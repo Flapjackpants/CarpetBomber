@@ -20,6 +20,7 @@ This installs two commands:
 
 ```bash
 CarpetBomber
+CarpetBomber this   # open Add with the current directory as path
 ```
 
 From the queue screen:

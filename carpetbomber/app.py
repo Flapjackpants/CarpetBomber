@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -286,10 +287,10 @@ class SettingsScreen(JsonEditScreen):
 
 
 class AddPushScreen(JsonEditScreen):
-    def __init__(self) -> None:
+    def __init__(self, initial_path: str | None = None) -> None:
         default = default_schedule_time()
         payload = {
-            "path": "",
+            "path": initial_path or "",
             "date": default.strftime("%Y-%m-%d"),
             "time": "00:00",
         }
@@ -551,12 +552,21 @@ class CarpetBomberApp(App[None]):
     }
     """
 
+    def __init__(self, initial_add_path: str | None = None) -> None:
+        super().__init__()
+        self.initial_add_path = initial_add_path
+
     def on_mount(self) -> None:
         self.push_screen(QueueScreen())
+        if self.initial_add_path is not None:
+            self.push_screen(AddPushScreen(initial_path=self.initial_add_path))
 
 
 def main() -> None:
-    CarpetBomberApp().run()
+    initial_add_path: str | None = None
+    if len(sys.argv) > 1 and sys.argv[1] == "this":
+        initial_add_path = str(Path.cwd())
+    CarpetBomberApp(initial_add_path=initial_add_path).run()
 
 
 if __name__ == "__main__":
