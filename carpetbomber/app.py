@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -18,6 +19,7 @@ from textual.widgets import (
 )
 
 from carpetbomber import gitops, launchd, store, validate
+from carpetbomber.banner import render_title
 from carpetbomber.models import Job, JobStatus, Settings
 from carpetbomber.scheduler import default_schedule_time, next_free_slot, parse_user_datetime, pending_jobs
 
@@ -274,10 +276,10 @@ class QueueScreen(Screen[None]):
         layout: vertical;
     }
     #banner {
-        height: 3;
+        height: auto;
         padding: 0 2;
         background: $boost;
-        content-align: left middle;
+        content-align: center top;
     }
     #table-wrap {
         height: 1fr;
@@ -299,11 +301,7 @@ class QueueScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield Static(
-            "[bold]CarpetBomber[/bold]  —  scheduled git pushes",
-            id="banner",
-            markup=True,
-        )
+        yield Static(id="banner")
         with Vertical(id="table-wrap"):
             yield DataTable(id="queue-table", cursor_type="row", zebra_stripes=True)
         yield Static("", id="status-bar")
@@ -318,10 +316,19 @@ class QueueScreen(Screen[None]):
     def on_mount(self) -> None:
         table = self.query_one("#queue-table", DataTable)
         table.add_columns("Path", "Requested", "Scheduled", "Status", "Error")
+        self._refresh_banner()
         self.refresh_table()
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._refresh_banner()
 
     def on_screen_resume(self) -> None:
         self.refresh_table()
+
+    def _refresh_banner(self) -> None:
+        # Account for #banner horizontal padding (0 2).
+        width = max(0, self.size.width - 4)
+        self.query_one("#banner", Static).update(render_title(width))
 
     def refresh_table(self) -> None:
         table = self.query_one("#queue-table", DataTable)
