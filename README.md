@@ -32,9 +32,19 @@ From the queue screen:
 | Settings | `s` |
 | Quit | `q` |
 
-**Add a push:** give a git repo path, optional date (`YYYY-MM-DD`) and time (`HH:MM`). Defaults to **00:00 tomorrow**. CarpetBomber runs `git push` only (no commit).
+**Settings / Add / Edit** open a JSON buffer with the same shell layout as the queue (header, editor, status, footer). Controls are vim-lite:
 
-**Edit a push:** with a pending job selected, `e` opens the same fields pre-filled so you can change path and/or schedule time.
+| Mode | Keys |
+|------|------|
+| NORMAL | `h`/`j`/`k`/`l` or arrows move; `i` insert; `:` command |
+| INSERT | type to edit; arrows move; `Esc` back to NORMAL |
+| COMMAND | `:w` save, `:wq` save and quit, `:q` quit without saving; `Esc` cancels |
+
+**Add a push:** edit JSON fields `path`, `date` (`YYYY-MM-DD`), and `time` (`HH:MM`). Defaults to **00:00 tomorrow**. CarpetBomber runs `git push` only (no commit).
+
+**Edit a push:** with a pending job selected, `e` opens the same JSON pre-filled so you can change path and/or schedule time.
+
+**Settings:** edit `push_spacing_minutes` in the JSON buffer, then `:wq`.
 
 **Same-time collisions:** if that minute is taken, the job is placed on the next free slot stepped by **push spacing** (default 1 minute), configurable in Settings.
 
@@ -73,4 +83,3 @@ export CARPETBOMBER_CONFIG_DIR=/tmp/carpetbomber-test
 ```bash
 pytest
 ```
-# CarpetBomber

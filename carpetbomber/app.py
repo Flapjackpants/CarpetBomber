@@ -1,18 +1,18 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
-from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Vertical
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     DataTable,
     Footer,
     Header,
-    Input,
     Label,
     Static,
 )
@@ -21,6 +21,7 @@ from carpetbomber import gitops, launchd, store
 from carpetbomber.banner import render_title
 from carpetbomber.models import Job, JobStatus, Settings
 from carpetbomber.scheduler import default_schedule_time, next_free_slot, parse_user_datetime, pending_jobs
+from carpetbomber.vim_buffer import VimBuffer
 
 
 def sync_daemon_with_queue(jobs: list[Job] | None = None) -> None:
@@ -34,6 +35,21 @@ def sync_daemon_with_queue(jobs: list[Job] | None = None) -> None:
 
 def format_dt(value: datetime) -> str:
     return value.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def dumps_json(data: dict[str, Any]) -> str:
+    return json.dumps(data, indent=2) + "\n"
+
+
+def parse_editor_json(text: str) -> dict[str, Any] | str:
+    """Return parsed dict, or an error message string."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return f"Invalid JSON: {exc.msg} (line {exc.lineno})"
+    if not isinstance(data, dict):
+        return "JSON root must be an object"
+    return data
 
 
 class ConfirmCancelScreen(ModalScreen[bool]):
@@ -90,335 +106,244 @@ class ConfirmCancelScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
-class SettingsScreen(Screen[None]):
-    BINDINGS = [
-        Binding("ctrl+s", "save", "Save", priority=True),
-        Binding("escape", "back", "Back", priority=True),
-    ]
+class JsonEditScreen(Screen[None]):
+    """Home-like shell hosting a vim-lite JSON buffer."""
 
-    CSS = """
-    SettingsScreen {
-        padding: 1 2;
-    }
-    #settings-form {
-        width: 70;
-        max-width: 100%;
-        height: auto;
-        border: solid $accent;
-        padding: 1 2;
-        background: $surface;
-    }
-    #settings-form Input {
-        margin-bottom: 1;
-    }
-    #settings-path {
-        color: $text-muted;
-        margin-top: 1;
-    }
-    #showcmd {
-        height: 1;
-        padding: 0 2;
-        content-align: right middle;
-        color: $text-muted;
-    }
-    """
-
-    def compose(self) -> ComposeResult:
-        settings = store.load_settings()
-        yield Header()
-        with VerticalScroll():
-            yield Static("Settings", classes="title")
-            with Vertical(id="settings-form"):
-                yield Label("Minutes between pushes (same-time slots & catch-up)")
-                yield Input(
-                    value=str(settings.push_spacing_minutes),
-                    placeholder="1",
-                    id="spacing",
-                    type="integer",
-                )
-                yield Label(f"Config directory: {store.config_dir()}", id="settings-path")
-        yield Static("", id="showcmd")
-        yield Footer()
-
-    def _echo_cmd(self, key: str) -> None:
-        self.query_one("#showcmd", Static).update(key)
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        self._echo_cmd("↵")
-        self._save()
-
-    def action_save(self) -> None:
-        self._echo_cmd("^s")
-        self._save()
-
-    def action_back(self) -> None:
-        self._echo_cmd("esc")
-        self.app.pop_screen()
-
-    def _save(self) -> None:
-        raw = self.query_one("#spacing", Input).value.strip() or "1"
-        try:
-            spacing = max(1, int(raw))
-        except ValueError:
-            self.notify("Spacing must be a positive integer", severity="error")
-            return
-        store.save_settings(Settings(push_spacing_minutes=spacing))
-        self.notify(f"Saved spacing: {spacing} minute(s)")
-        self.app.pop_screen()
-
-
-class AddPushScreen(Screen[None]):
-    BINDINGS = [
-        Binding("ctrl+s", "submit", "Add", priority=True),
-        Binding("escape", "back", "Back", priority=True),
-    ]
-
-    CSS = """
-    AddPushScreen {
-        padding: 1 2;
-    }
-    #add-form {
-        width: 80;
-        max-width: 100%;
-        height: auto;
-        border: solid $accent;
-        padding: 1 2;
-        background: $surface;
-    }
-    #add-form Input {
-        margin-bottom: 1;
-    }
-    #hint {
-        color: $text-muted;
-        margin-bottom: 1;
-    }
-    #showcmd {
-        height: 1;
-        padding: 0 2;
-        content-align: right middle;
-        color: $text-muted;
-    }
-    """
-
-    def compose(self) -> ComposeResult:
-        default = default_schedule_time()
-        yield Header()
-        with VerticalScroll():
-            yield Static("Schedule a push", classes="title")
-            yield Label(
-                f"Default: {format_dt(default)} (tomorrow 00:00). "
-                "Leave date/time blank to use default.",
-                id="hint",
-            )
-            with Vertical(id="add-form"):
-                yield Label("Repository path")
-                yield Input(placeholder="/path/to/repo", id="path")
-                yield Label("Date (YYYY-MM-DD)")
-                yield Input(placeholder=default.strftime("%Y-%m-%d"), id="date")
-                yield Label("Time (HH:MM)")
-                yield Input(placeholder="00:00", id="time")
-        yield Static("", id="showcmd")
-        yield Footer()
-
-    def _echo_cmd(self, key: str) -> None:
-        self.query_one("#showcmd", Static).update(key)
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        self._echo_cmd("↵")
-        self._submit()
-
-    def action_back(self) -> None:
-        self._echo_cmd("esc")
-        self.app.pop_screen()
-
-    def action_submit(self) -> None:
-        self._echo_cmd("^s")
-        self._submit()
-
-    def _submit(self) -> None:
-        path_raw = self.query_one("#path", Input).value.strip()
-        date_raw = self.query_one("#date", Input).value.strip()
-        time_raw = self.query_one("#time", Input).value.strip()
-
-        if not path_raw:
-            self.notify("Path is required", severity="error")
-            return
-
-        resolved = gitops.resolve_repo_path(path_raw)
-        if resolved is None:
-            self.notify("Not a git repository", severity="error")
-            return
-
-        try:
-            requested = parse_user_datetime(date_raw, time_raw)
-        except (ValueError, IndexError):
-            self.notify("Invalid date or time", severity="error")
-            return
-
-        settings = store.load_settings()
-        new_job_id: str | None = None
-
-        def mutator(jobs: list[Job]) -> list[Job]:
-            nonlocal new_job_id
-            scheduled = next_free_slot(requested, jobs, settings.push_spacing_minutes)
-            job = Job(
-                path=str(resolved),
-                scheduled_at=scheduled,
-                requested_at=requested,
-            )
-            new_job_id = job.id
-            return list(jobs) + [job]
-
-        new_jobs = store.update_queue(mutator)
-        sync_daemon_with_queue(new_jobs)
-
-        added = next((j for j in new_jobs if j.id == new_job_id), None)
-        if added is None:
-            self.notify("Failed to queue push", severity="error")
-        else:
-            extra = ""
-            req = requested.replace(second=0, microsecond=0)
-            got = added.scheduled_at.replace(second=0, microsecond=0)
-            if got != req:
-                extra = f" (slot adjusted to {format_dt(added.scheduled_at)})"
-            self.notify(f"Scheduled {Path(added.path).name} for {format_dt(added.scheduled_at)}{extra}")
-
-        self.app.pop_screen()
-
-
-class EditPushScreen(Screen[None]):
-    BINDINGS = [
-        Binding("ctrl+s", "submit", "Save", priority=True),
-        Binding("escape", "back", "Back", priority=True),
-    ]
-
-    CSS = """
-    EditPushScreen {
-        padding: 1 2;
-    }
-    #edit-form {
-        width: 80;
-        max-width: 100%;
-        height: auto;
-        border: solid $accent;
-        padding: 1 2;
-        background: $surface;
-    }
-    #edit-form Input {
-        margin-bottom: 1;
-    }
-    #hint {
-        color: $text-muted;
-        margin-bottom: 1;
-    }
-    #showcmd {
-        height: 1;
-        padding: 0 2;
-        content-align: right middle;
-        color: $text-muted;
-    }
-    """
-
-    def __init__(self, job: Job) -> None:
+    def __init__(self, title: str, initial_text: str) -> None:
         super().__init__()
-        self.job = job
+        self._title = title
+        self._initial_text = initial_text
 
     def compose(self) -> ComposeResult:
-        local = self.job.requested_at.astimezone()
-        yield Header()
-        with VerticalScroll():
-            yield Static("Edit scheduled push", classes="title")
-            yield Label(
-                "Change path and/or date/time. Ctrl+S to save.",
-                id="hint",
-            )
-            with Vertical(id="edit-form"):
-                yield Label("Repository path")
-                yield Input(value=self.job.path, placeholder="/path/to/repo", id="path")
-                yield Label("Date (YYYY-MM-DD)")
-                yield Input(value=local.strftime("%Y-%m-%d"), id="date")
-                yield Label("Time (HH:MM)")
-                yield Input(value=local.strftime("%H:%M"), id="time")
+        yield Header(show_clock=True)
+        yield Static(self._title, classes="title")
+        with Vertical(id="editor-wrap"):
+            yield VimBuffer(self._initial_text, id="editor")
+        yield Static("-- NORMAL --", id="mode-bar")
         yield Static("", id="showcmd")
         yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#editor", VimBuffer).focus()
 
     def _echo_cmd(self, key: str) -> None:
         self.query_one("#showcmd", Static).update(key)
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        self._echo_cmd("↵")
-        self._submit()
+    def on_vim_buffer_mode_changed(self, event: VimBuffer.ModeChanged) -> None:
+        self.query_one("#mode-bar", Static).update(event.status)
 
-    def action_back(self) -> None:
-        self._echo_cmd("esc")
-        self.app.pop_screen()
-
-    def action_submit(self) -> None:
-        self._echo_cmd("^s")
-        self._submit()
-
-    def _submit(self) -> None:
-        path_raw = self.query_one("#path", Input).value.strip()
-        date_raw = self.query_one("#date", Input).value.strip()
-        time_raw = self.query_one("#time", Input).value.strip()
-
-        if not path_raw:
-            self.notify("Path is required", severity="error")
+    def on_vim_buffer_command_submitted(self, event: VimBuffer.CommandSubmitted) -> None:
+        cmd = event.command.strip()
+        self._echo_cmd(f":{cmd}")
+        if cmd == "q":
+            self.app.pop_screen()
             return
-
-        resolved = gitops.resolve_repo_path(path_raw)
-        if resolved is None:
-            self.notify("Not a git repository", severity="error")
+        if cmd in ("w", "wq"):
+            err = self._save()
+            if err:
+                self.notify(err, severity="error")
+                return
+            if cmd == "wq":
+                self.app.pop_screen()
             return
+        self.notify(f"Unknown command: :{cmd}", severity="warning")
 
-        try:
-            requested = parse_user_datetime(date_raw, time_raw)
-        except (ValueError, IndexError):
-            self.notify("Invalid date or time", severity="error")
-            return
+    def _save(self) -> str | None:
+        text = self.query_one("#editor", VimBuffer).get_text()
+        data = parse_editor_json(text)
+        if isinstance(data, str):
+            return data
+        return self.apply(data)
 
-        settings = store.load_settings()
-        job_id = self.job.id
+    def apply(self, data: dict[str, Any]) -> str | None:
+        """Apply parsed JSON. Return error message or None on success."""
+        raise NotImplementedError
 
-        def mutator(jobs: list[Job]) -> list[Job]:
-            updated: list[Job] = []
-            found = False
-            for job in jobs:
-                if job.id != job_id:
-                    updated.append(job)
-                    continue
-                found = True
-                scheduled = next_free_slot(
-                    requested,
-                    jobs,
-                    settings.push_spacing_minutes,
-                    exclude_id=job_id,
-                )
-                job.path = str(resolved)
-                job.requested_at = requested
-                job.scheduled_at = scheduled
+
+def apply_settings(data: dict[str, Any]) -> str | None:
+    raw = data.get("push_spacing_minutes", 1)
+    try:
+        spacing = max(1, int(raw))
+    except (TypeError, ValueError):
+        return "push_spacing_minutes must be a positive integer"
+    store.save_settings(Settings(push_spacing_minutes=spacing))
+    return None
+
+
+def schedule_fields_from_data(data: dict[str, Any]) -> tuple[str, str, str] | str:
+    path = data.get("path", "")
+    date = data.get("date", "")
+    time = data.get("time", "")
+    if not isinstance(path, str):
+        return "path must be a string"
+    if not isinstance(date, str):
+        return "date must be a string"
+    if not isinstance(time, str):
+        return "time must be a string"
+    return path.strip(), date.strip(), time.strip()
+
+
+def apply_add_job(
+    path_raw: str, date_raw: str, time_raw: str
+) -> tuple[Job, datetime] | str:
+    """Return (job, requested) on success, or an error message."""
+    if not path_raw:
+        return "Path is required"
+
+    resolved = gitops.resolve_repo_path(path_raw)
+    if resolved is None:
+        return "Not a git repository"
+
+    try:
+        requested = parse_user_datetime(date_raw, time_raw)
+    except (ValueError, IndexError):
+        return "Invalid date or time"
+
+    settings = store.load_settings()
+    new_job_id: str | None = None
+
+    def mutator(jobs: list[Job]) -> list[Job]:
+        nonlocal new_job_id
+        scheduled = next_free_slot(requested, jobs, settings.push_spacing_minutes)
+        job = Job(
+            path=str(resolved),
+            scheduled_at=scheduled,
+            requested_at=requested,
+        )
+        new_job_id = job.id
+        return list(jobs) + [job]
+
+    new_jobs = store.update_queue(mutator)
+    sync_daemon_with_queue(new_jobs)
+
+    added = next((j for j in new_jobs if j.id == new_job_id), None)
+    if added is None:
+        return "Failed to queue push"
+    return added, requested
+
+
+def apply_edit_job(
+    job_id: str, path_raw: str, date_raw: str, time_raw: str
+) -> tuple[Job, datetime] | str:
+    """Return (job, requested) on success, or an error message."""
+    if not path_raw:
+        return "Path is required"
+
+    resolved = gitops.resolve_repo_path(path_raw)
+    if resolved is None:
+        return "Not a git repository"
+
+    try:
+        requested = parse_user_datetime(date_raw, time_raw)
+    except (ValueError, IndexError):
+        return "Invalid date or time"
+
+    settings = store.load_settings()
+
+    def mutator(jobs: list[Job]) -> list[Job]:
+        updated: list[Job] = []
+        found = False
+        for job in jobs:
+            if job.id != job_id:
                 updated.append(job)
-            if not found:
-                return jobs
-            return updated
-
-        new_jobs = store.update_queue(mutator)
-        sync_daemon_with_queue(new_jobs)
-
-        edited = next((j for j in new_jobs if j.id == job_id), None)
-        if edited is None:
-            self.notify("Job not found", severity="warning")
-        else:
-            extra = ""
-            req = requested.replace(second=0, microsecond=0)
-            got = edited.scheduled_at.replace(second=0, microsecond=0)
-            if got != req:
-                extra = f" (slot adjusted to {format_dt(edited.scheduled_at)})"
-            self.notify(
-                f"Updated {Path(edited.path).name} for {format_dt(edited.scheduled_at)}{extra}"
+                continue
+            found = True
+            scheduled = next_free_slot(
+                requested,
+                jobs,
+                settings.push_spacing_minutes,
+                exclude_id=job_id,
             )
+            job.path = str(resolved)
+            job.requested_at = requested
+            job.scheduled_at = scheduled
+            updated.append(job)
+        if not found:
+            return jobs
+        return updated
 
-        self.app.pop_screen()
+    new_jobs = store.update_queue(mutator)
+    sync_daemon_with_queue(new_jobs)
+
+    edited = next((j for j in new_jobs if j.id == job_id), None)
+    if edited is None:
+        return "Job not found"
+    return edited, requested
+
+
+class SettingsScreen(JsonEditScreen):
+    def __init__(self) -> None:
+        settings = store.load_settings()
+        super().__init__("Settings", dumps_json(settings.to_dict()))
+
+    def apply(self, data: dict[str, Any]) -> str | None:
+        err = apply_settings(data)
+        if err:
+            return err
+        spacing = max(1, int(data.get("push_spacing_minutes", 1)))
+        self.notify(f"Saved spacing: {spacing} minute(s)")
+        return None
+
+
+class AddPushScreen(JsonEditScreen):
+    def __init__(self) -> None:
+        default = default_schedule_time()
+        payload = {
+            "path": "",
+            "date": default.strftime("%Y-%m-%d"),
+            "time": "00:00",
+        }
+        super().__init__("Schedule a push", dumps_json(payload))
+
+    def apply(self, data: dict[str, Any]) -> str | None:
+        fields = schedule_fields_from_data(data)
+        if isinstance(fields, str):
+            return fields
+        path_raw, date_raw, time_raw = fields
+        result = apply_add_job(path_raw, date_raw, time_raw)
+        if isinstance(result, str):
+            return result
+        added, requested = result
+        extra = ""
+        req = requested.replace(second=0, microsecond=0)
+        got = added.scheduled_at.replace(second=0, microsecond=0)
+        if got != req:
+            extra = f" (slot adjusted to {format_dt(added.scheduled_at)})"
+        self.notify(
+            f"Scheduled {Path(added.path).name} for {format_dt(added.scheduled_at)}{extra}"
+        )
+        return None
+
+
+class EditPushScreen(JsonEditScreen):
+    def __init__(self, job: Job) -> None:
+        self.job = job
+        local = job.requested_at.astimezone()
+        payload = {
+            "path": job.path,
+            "date": local.strftime("%Y-%m-%d"),
+            "time": local.strftime("%H:%M"),
+        }
+        super().__init__("Edit scheduled push", dumps_json(payload))
+
+    def apply(self, data: dict[str, Any]) -> str | None:
+        fields = schedule_fields_from_data(data)
+        if isinstance(fields, str):
+            return fields
+        path_raw, date_raw, time_raw = fields
+        result = apply_edit_job(self.job.id, path_raw, date_raw, time_raw)
+        if isinstance(result, str):
+            return result
+        edited, requested = result
+        extra = ""
+        req = requested.replace(second=0, microsecond=0)
+        got = edited.scheduled_at.replace(second=0, microsecond=0)
+        if got != req:
+            extra = f" (slot adjusted to {format_dt(edited.scheduled_at)})"
+        self.notify(
+            f"Updated {Path(edited.path).name} for {format_dt(edited.scheduled_at)}{extra}"
+        )
+        return None
 
 
 class QueueScreen(Screen[None]):
@@ -475,7 +400,7 @@ class QueueScreen(Screen[None]):
         self._refresh_banner()
         self.refresh_table()
 
-    def on_resize(self, event: events.Resize) -> None:
+    def on_resize(self, event) -> None:
         self._refresh_banner()
 
     def on_screen_resume(self) -> None:
@@ -586,6 +511,11 @@ class CarpetBomberApp(App[None]):
     Screen {
         background: #0f1419;
     }
+    SettingsScreen,
+    AddPushScreen,
+    EditPushScreen {
+        layout: vertical;
+    }
     .title {
         text-style: bold;
         color: #e8c47c;
@@ -600,6 +530,24 @@ class CarpetBomberApp(App[None]):
     }
     DataTable > .datatable--cursor {
         background: #2a4a6a;
+    }
+    #editor-wrap {
+        height: 1fr;
+        padding: 0 1;
+    }
+    #editor-wrap VimBuffer {
+        height: 1fr;
+    }
+    #mode-bar {
+        height: 1;
+        padding: 0 2;
+        color: $text-muted;
+    }
+    #showcmd {
+        height: 1;
+        padding: 0 2;
+        content-align: right middle;
+        color: $text-muted;
     }
     """
 
