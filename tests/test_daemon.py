@@ -33,7 +33,6 @@ def test_daemon_executes_overdue_and_removes(tmp_path: Path, monkeypatch):
 
     with (
         patch.object(daemon, "_log"),
-        patch("carpetbomber.daemon.gitops.has_something_to_push", return_value=True),
         patch(
             "carpetbomber.daemon.gitops.git_push",
             return_value=GitResult(ok=True, stdout="", stderr="", returncode=0),

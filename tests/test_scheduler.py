@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -14,7 +13,6 @@ from carpetbomber.scheduler import (
     overdue_jobs,
     parse_user_datetime,
 )
-from carpetbomber.validate import revalidate_queue
 
 
 TZ = timezone(timedelta(hours=-4))
@@ -98,23 +96,6 @@ def test_catch_up_start_times_spaced_from_now():
     assert starts[0][1] == now
     assert starts[1][1] == now + timedelta(minutes=1)
     assert [j.path for j, _ in starts] == ["/a", "/b"]
-
-
-def test_revalidate_cancels_nothing_to_push():
-    jobs = [
-        _job("/keep", _dt(2026, 9, 24, 0, 0)),
-        _job("/drop", _dt(2026, 9, 24, 0, 1)),
-        _job("/failed", _dt(2026, 9, 24, 0, 2), status=JobStatus.FAILED),
-    ]
-
-    def fake_has(path):
-        return path == "/keep"
-
-    with patch("carpetbomber.validate.has_something_to_push", side_effect=fake_has):
-        kept, cancelled = revalidate_queue(jobs)
-
-    assert [j.path for j in kept] == ["/keep", "/failed"]
-    assert [j.path for j in cancelled] == ["/drop"]
 
 
 def test_settings_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

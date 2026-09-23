@@ -5,7 +5,7 @@ import sys
 import time
 from datetime import datetime
 
-from carpetbomber import gitops, launchd, store, validate
+from carpetbomber import gitops, launchd, store
 from carpetbomber.models import JobStatus
 from carpetbomber.scheduler import next_due_job, overdue_jobs, pending_jobs
 
@@ -28,9 +28,6 @@ def _execute_push(job_id: str) -> None:
         target = next((j for j in jobs if j.id == job_id), None)
         if target is None or target.status != JobStatus.PENDING:
             return jobs
-        if not gitops.has_something_to_push(target.path):
-            _log(f"cancel {target.path}: nothing to push")
-            return [j for j in jobs if j.id != job_id]
 
         _log(f"pushing {target.path}")
         result = gitops.git_push(target.path)
@@ -51,16 +48,6 @@ def _execute_push(job_id: str) -> None:
     store.update_queue(mutator)
 
 
-def _revalidate() -> list:
-    def mutator(jobs):
-        kept, cancelled = validate.revalidate_queue(jobs)
-        for job in cancelled:
-            _log(f"cancel {job.path}: nothing to push")
-        return kept
-
-    return store.update_queue(mutator)
-
-
 def run_once_cycle() -> bool:
     """
     Process overdue jobs (spaced), then return whether any pending remain.
@@ -69,7 +56,7 @@ def run_once_cycle() -> bool:
     settings = store.load_settings()
     spacing = max(1, settings.push_spacing_minutes)
 
-    jobs = _revalidate()
+    jobs = store.load_queue()
     pending = pending_jobs(jobs)
     if not pending:
         # Keep failed jobs visible in TUI but daemon should not stay alive for them alone
@@ -88,7 +75,7 @@ def run_once_cycle() -> bool:
                 time.sleep(spacing * 60)
                 if _STOP:
                     break
-            # Re-check still pending / still has changes
+            # Re-check still pending
             current = store.load_queue()
             live = next((j for j in current if j.id == job.id and j.status == JobStatus.PENDING), None)
             if live is None:
@@ -106,7 +93,7 @@ def run_once_cycle() -> bool:
         return False
 
     wait_seconds = (nxt.scheduled_at - now).total_seconds()
-    # Cap sleep so we periodically revalidate and notice TUI changes
+    # Cap sleep so we periodically notice TUI changes
     sleep_for = min(max(wait_seconds, 0), 60)
     _log(f"sleeping {sleep_for:.0f}s until next check (due {nxt.scheduled_at.isoformat()})")
     end = time.time() + sleep_for

@@ -17,7 +17,7 @@ from textual.widgets import (
     Static,
 )
 
-from carpetbomber import gitops, launchd, store, validate
+from carpetbomber import gitops, launchd, store
 from carpetbomber.banner import render_title
 from carpetbomber.models import Job, JobStatus, Settings
 from carpetbomber.scheduler import default_schedule_time, next_free_slot, parse_user_datetime, pending_jobs
@@ -249,13 +249,6 @@ class AddPushScreen(Screen[None]):
             self.notify("Not a git repository", severity="error")
             return
 
-        if not gitops.has_something_to_push(resolved):
-            self.notify(
-                "Nothing to push (no unpushed commits / no upstream)",
-                severity="error",
-            )
-            return
-
         try:
             requested = parse_user_datetime(date_raw, time_raw)
         except (ValueError, IndexError):
@@ -263,11 +256,10 @@ class AddPushScreen(Screen[None]):
             return
 
         settings = store.load_settings()
-        cancelled_paths: list[str] = []
         new_job_id: str | None = None
 
         def mutator(jobs: list[Job]) -> list[Job]:
-            nonlocal new_job_id, cancelled_paths
+            nonlocal new_job_id
             scheduled = next_free_slot(requested, jobs, settings.push_spacing_minutes)
             job = Job(
                 path=str(resolved),
@@ -275,28 +267,14 @@ class AddPushScreen(Screen[None]):
                 requested_at=requested,
             )
             new_job_id = job.id
-            combined = list(jobs) + [job]
-            kept, cancelled = validate.revalidate_queue(combined)
-            cancelled_paths = [c.path for c in cancelled]
-            return kept
+            return list(jobs) + [job]
 
         new_jobs = store.update_queue(mutator)
         sync_daemon_with_queue(new_jobs)
 
-        if cancelled_paths:
-            names = ", ".join(Path(p).name for p in cancelled_paths[:3])
-            more = f" (+{len(cancelled_paths) - 3})" if len(cancelled_paths) > 3 else ""
-            self.notify(
-                f"Cancelled {len(cancelled_paths)} with nothing to push: {names}{more}",
-                severity="warning",
-            )
-
         added = next((j for j in new_jobs if j.id == new_job_id), None)
         if added is None:
-            self.notify(
-                "Push not queued — nothing left to push after validation",
-                severity="warning",
-            )
+            self.notify("Failed to queue push", severity="error")
         else:
             extra = ""
             req = requested.replace(second=0, microsecond=0)
@@ -393,13 +371,6 @@ class EditPushScreen(Screen[None]):
             self.notify("Not a git repository", severity="error")
             return
 
-        if not gitops.has_something_to_push(resolved):
-            self.notify(
-                "Nothing to push (no unpushed commits / no upstream)",
-                severity="error",
-            )
-            return
-
         try:
             requested = parse_user_datetime(date_raw, time_raw)
         except (ValueError, IndexError):
@@ -408,10 +379,8 @@ class EditPushScreen(Screen[None]):
 
         settings = store.load_settings()
         job_id = self.job.id
-        cancelled_paths: list[str] = []
 
         def mutator(jobs: list[Job]) -> list[Job]:
-            nonlocal cancelled_paths
             updated: list[Job] = []
             found = False
             for job in jobs:
@@ -431,27 +400,14 @@ class EditPushScreen(Screen[None]):
                 updated.append(job)
             if not found:
                 return jobs
-            kept, cancelled = validate.revalidate_queue(updated)
-            cancelled_paths = [c.path for c in cancelled]
-            return kept
+            return updated
 
         new_jobs = store.update_queue(mutator)
         sync_daemon_with_queue(new_jobs)
 
-        if cancelled_paths:
-            names = ", ".join(Path(p).name for p in cancelled_paths[:3])
-            more = f" (+{len(cancelled_paths) - 3})" if len(cancelled_paths) > 3 else ""
-            self.notify(
-                f"Cancelled {len(cancelled_paths)} with nothing to push: {names}{more}",
-                severity="warning",
-            )
-
         edited = next((j for j in new_jobs if j.id == job_id), None)
         if edited is None:
-            self.notify(
-                "Push removed — nothing left to push after validation",
-                severity="warning",
-            )
+            self.notify("Job not found", severity="warning")
         else:
             extra = ""
             req = requested.replace(second=0, microsecond=0)

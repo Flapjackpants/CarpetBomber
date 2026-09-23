@@ -38,8 +38,6 @@ From the queue screen:
 
 **Same-time collisions:** if that minute is taken, the job is placed on the next free slot stepped by **push spacing** (default 1 minute), configurable in Settings.
 
-**Nothing to push:** whenever you add a job, every queued path is checked. Jobs with no unpushed commits (or no upstream) are cancelled. If the queue has no pending jobs left, the background daemon is stopped.
-
 **Quit:** leaves the daemon running if pending jobs remain.
 
 ## How background pushes work
