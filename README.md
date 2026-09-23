@@ -30,7 +30,6 @@ From the queue screen:
 | Edit selected | `e` |
 | Cancel selected | `c` |
 | Settings | `s` |
-| Refresh / revalidate | `r` |
 | Quit | `q` |
 
 **Add a push:** give a git repo path, optional date (`YYYY-MM-DD`) and time (`HH:MM`). Defaults to **00:00 tomorrow**. CarpetBomber runs `git push` only (no commit).

@@ -471,7 +471,6 @@ class QueueScreen(Screen[None]):
         Binding("e", "edit_selected", "Edit"),
         Binding("c", "cancel_selected", "Cancel"),
         Binding("s", "settings", "Settings"),
-        Binding("r", "refresh", "Refresh"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -591,18 +590,6 @@ class QueueScreen(Screen[None]):
     def action_settings(self) -> None:
         self._echo_cmd("s")
         self.app.push_screen(SettingsScreen())
-
-    def action_refresh(self) -> None:
-        self._echo_cmd("r")
-
-        def mutator(jobs: list[Job]) -> list[Job]:
-            kept, _cancelled = validate.revalidate_queue(jobs)
-            return kept
-
-        jobs = store.update_queue(mutator)
-        sync_daemon_with_queue(jobs)
-        self.refresh_table()
-        self.notify("Queue refreshed")
 
     def action_cancel_selected(self) -> None:
         self._echo_cmd("c")
