@@ -30,9 +30,11 @@ From the queue screen:
 | Add push | `a` |
 | Edit selected | `e` |
 | Run selected now | `r` |
-| Cancel selected | `c` |
+| Cancel selected | `c` (then `y`/`n`) |
 | Settings | `s` |
 | Quit | `q` |
+
+**Cancel:** with a job selected, `c` replaces the status line with `Confirm?`; `y` removes it, `n` aborts.
 
 **Settings / Add / Edit** open a JSON buffer with the same shell layout as the queue (header, editor, status, footer). Controls are vim-lite:
 

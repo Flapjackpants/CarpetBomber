@@ -63,60 +63,6 @@ def parse_editor_json(text: str) -> dict[str, Any] | str:
     return data
 
 
-class ConfirmCancelScreen(ModalScreen[bool]):
-    BINDINGS = [
-        Binding("y", "confirm", "Cancel push"),
-        Binding("n", "keep", "Keep"),
-        Binding("escape", "back", "Keep"),
-    ]
-
-    CSS = """
-    ConfirmCancelScreen {
-        align: center middle;
-    }
-    #confirm-box {
-        width: 60;
-        height: auto;
-        border: thick $error;
-        background: $surface;
-        padding: 1 2;
-    }
-    #confirm-box Label {
-        margin-bottom: 1;
-    }
-    #showcmd {
-        height: 1;
-        content-align: right middle;
-        color: $text-muted;
-    }
-    """
-
-    def __init__(self, job: Job) -> None:
-        super().__init__()
-        self.job = job
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="confirm-box"):
-            yield Label(f"Cancel push for\n{self.job.path}?")
-            yield Static("", id="showcmd")
-        yield Footer()
-
-    def _echo_cmd(self, key: str) -> None:
-        self.query_one("#showcmd", Static).update(key)
-
-    def action_confirm(self) -> None:
-        self._echo_cmd("y")
-        self.dismiss(True)
-
-    def action_keep(self) -> None:
-        self._echo_cmd("n")
-        self.dismiss(False)
-
-    def action_back(self) -> None:
-        self._echo_cmd("esc")
-        self.dismiss(False)
-
-
 class PushingScreen(ModalScreen[None]):
     """Non-dismissible loading modal shown while a git push is in flight."""
 
@@ -462,7 +408,14 @@ class QueueScreen(Screen[None]):
         Binding("c", "cancel_selected", "Cancel"),
         Binding("s", "settings", "Settings"),
         Binding("q", "quit", "Quit"),
+        Binding("y", "confirm_cancel_yes", "Yes"),
+        Binding("n", "confirm_cancel_no", "No"),
     ]
+
+    _NORMAL_ACTIONS = frozenset(
+        {"add", "edit_selected", "run_selected", "cancel_selected", "settings", "quit"}
+    )
+    _CONFIRM_ACTIONS = frozenset({"confirm_cancel_yes", "confirm_cancel_no"})
 
     CSS = """
     QueueScreen {
@@ -499,6 +452,15 @@ class QueueScreen(Screen[None]):
         self._loading_job_id: str | None = None
         self._schedule_timer = None
         self._spacing_after_push = False
+        self._cancel_confirm_id: str | None = None
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        confirming = self._cancel_confirm_id is not None
+        if action in self._CONFIRM_ACTIONS:
+            return confirming
+        if action in self._NORMAL_ACTIONS:
+            return not confirming
+        return True
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -632,6 +594,17 @@ class QueueScreen(Screen[None]):
             except Exception:
                 pass
 
+        if self._cancel_confirm_id is not None:
+            if any(j.id == self._cancel_confirm_id for j in jobs):
+                self.query_one("#status-bar", Static).update("Confirm?")
+            else:
+                self._cancel_confirm_id = None
+                self._update_status_bar(jobs)
+                self.refresh_bindings()
+        else:
+            self._update_status_bar(jobs)
+
+    def _update_status_bar(self, jobs: list[Job]) -> None:
         pending = pending_jobs(jobs)
         pushing = pushing_jobs(jobs)
         failed = [j for j in jobs if j.status == JobStatus.FAILED]
@@ -756,22 +729,35 @@ class QueueScreen(Screen[None]):
             self.refresh_table()
             return
 
-        def on_confirm(confirmed: bool) -> None:
-            if not confirmed:
-                return
+        self._cancel_confirm_id = job_id
+        self.query_one("#status-bar", Static).update("Confirm?")
+        self.refresh_bindings()
 
-            def mutator(current: list[Job]) -> list[Job]:
-                return [j for j in current if j.id != job_id]
+    def action_confirm_cancel_yes(self) -> None:
+        self._echo_cmd("y")
+        job_id = self._cancel_confirm_id
+        if not job_id:
+            return
 
-            store.update_queue(mutator)
-            self.refresh_table()
-            self._arm_next_push()
-            self.notify("Cancelled")
+        def mutator(current: list[Job]) -> list[Job]:
+            return [j for j in current if j.id != job_id]
 
-        self.app.push_screen(ConfirmCancelScreen(job), on_confirm)
+        store.update_queue(mutator)
+        self._cancel_confirm_id = None
+        self.refresh_table()
+        self.refresh_bindings()
+        self._arm_next_push()
+        self.notify("Cancelled")
+
+    def action_confirm_cancel_no(self) -> None:
+        self._echo_cmd("n")
+        self._cancel_confirm_id = None
+        self._update_status_bar(store.load_queue())
+        self.refresh_bindings()
 
     def action_quit(self) -> None:
         self._echo_cmd("q")
+        self._cancel_schedule_timer()
         self.app.exit()
 
 
@@ -831,16 +817,16 @@ class CarpetBomberApp(App[None]):
         if self.initial_add_path is not None:
             self.push_screen(AddPushScreen(initial_path=self.initial_add_path))
 
-    def on_unmount(self) -> None:
-        # Hand remaining pending jobs back to the LaunchAgent daemon
-        sync_daemon_with_queue()
-
 
 def main() -> None:
     initial_add_path: str | None = None
     if len(sys.argv) > 1 and sys.argv[1] == "this":
         initial_add_path = str(Path.cwd())
-    CarpetBomberApp(initial_add_path=initial_add_path).run()
+    try:
+        CarpetBomberApp(initial_add_path=initial_add_path).run()
+    finally:
+        # Hand remaining pending jobs back to the LaunchAgent after the TUI exits
+        sync_daemon_with_queue()
 
 
 if __name__ == "__main__":

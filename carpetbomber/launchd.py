@@ -9,6 +9,9 @@ from pathlib import Path
 
 LABEL = "com.carpetbomber.daemon"
 
+# launchctl can stall; never block process exit on it
+_LAUNCHCTL_TIMEOUT = 0.5
+
 
 def plist_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
@@ -72,15 +75,24 @@ def _uid() -> str:
     return str(os.getuid())
 
 
+def _run_launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run launchctl with a hard timeout so a stall cannot hang the process."""
+    try:
+        return subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_LAUNCHCTL_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(args, returncode=-1, stdout="", stderr="timeout")
+
+
 def is_loaded() -> bool:
     if sys.platform != "darwin":
         return False
-    result = subprocess.run(
-        ["launchctl", "print", f"gui/{_uid()}/{LABEL}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result = _run_launchctl(["launchctl", "print", f"gui/{_uid()}/{LABEL}"])
     return result.returncode == 0
 
 
@@ -92,29 +104,12 @@ def bootstrap() -> None:
     domain = f"gui/{_uid()}"
     # bootout first if already loaded so ProgramArguments updates take effect
     if is_loaded():
-        subprocess.run(
-            ["launchctl", "bootout", f"{domain}/{LABEL}"],
-            capture_output=True,
-            check=False,
-        )
-    result = subprocess.run(
-        ["launchctl", "bootstrap", domain, str(path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+        _run_launchctl(["launchctl", "bootout", f"{domain}/{LABEL}"])
+    result = _run_launchctl(["launchctl", "bootstrap", domain, str(path)])
     if result.returncode != 0:
         # Older macOS fallback
-        subprocess.run(
-            ["launchctl", "load", "-w", str(path)],
-            capture_output=True,
-            check=False,
-        )
-    subprocess.run(
-        ["launchctl", "kickstart", "-k", f"{domain}/{LABEL}"],
-        capture_output=True,
-        check=False,
-    )
+        _run_launchctl(["launchctl", "load", "-w", str(path)])
+    _run_launchctl(["launchctl", "kickstart", "-k", f"{domain}/{LABEL}"])
 
 
 def bootout() -> None:
@@ -122,17 +117,9 @@ def bootout() -> None:
     if sys.platform != "darwin":
         return
     domain = f"gui/{_uid()}"
-    subprocess.run(
-        ["launchctl", "bootout", f"{domain}/{LABEL}"],
-        capture_output=True,
-        check=False,
-    )
+    _run_launchctl(["launchctl", "bootout", f"{domain}/{LABEL}"])
     path = plist_path()
-    subprocess.run(
-        ["launchctl", "unload", "-w", str(path)],
-        capture_output=True,
-        check=False,
-    )
+    _run_launchctl(["launchctl", "unload", "-w", str(path)])
 
 
 def ensure_daemon_running() -> None:
