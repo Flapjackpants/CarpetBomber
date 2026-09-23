@@ -18,7 +18,7 @@ from textual.widgets import (
     Static,
 )
 
-from carpetbomber import gitops, launchd, store
+from carpetbomber import daemon, gitops, launchd, store
 from carpetbomber.banner import render_title
 from carpetbomber.models import Job, JobStatus, Settings
 from carpetbomber.scheduler import default_schedule_time, next_free_slot, parse_user_datetime, pending_jobs
@@ -184,8 +184,26 @@ def schedule_fields_from_data(data: dict[str, Any]) -> tuple[str, str, str] | st
     return path.strip(), date.strip(), time.strip()
 
 
+def read_ssh_passphrase(data: dict[str, Any]) -> tuple[bool, str] | str:
+    """
+    Parse optional ssh_passphrase from editor JSON.
+    Returns (key_present, value) on success, or an error message string.
+    """
+    if "ssh_passphrase" not in data:
+        return False, ""
+    raw = data["ssh_passphrase"]
+    if raw is None:
+        return True, ""
+    if not isinstance(raw, str):
+        return "ssh_passphrase must be a string"
+    return True, raw
+
+
 def apply_add_job(
-    path_raw: str, date_raw: str, time_raw: str
+    path_raw: str,
+    date_raw: str,
+    time_raw: str,
+    ssh_passphrase: str | None = None,
 ) -> tuple[Job, datetime] | str:
     """Return (job, requested) on success, or an error message."""
     if not path_raw:
@@ -200,6 +218,10 @@ def apply_add_job(
     except (ValueError, IndexError):
         return "Invalid date or time"
 
+    passphrase: str | None = None
+    if gitops.requires_ssh_auth(resolved):
+        passphrase = ssh_passphrase or None
+
     settings = store.load_settings()
     new_job_id: str | None = None
 
@@ -210,6 +232,7 @@ def apply_add_job(
             path=str(resolved),
             scheduled_at=scheduled,
             requested_at=requested,
+            ssh_passphrase=passphrase,
         )
         new_job_id = job.id
         return list(jobs) + [job]
@@ -224,9 +247,19 @@ def apply_add_job(
 
 
 def apply_edit_job(
-    job_id: str, path_raw: str, date_raw: str, time_raw: str
+    job_id: str,
+    path_raw: str,
+    date_raw: str,
+    time_raw: str,
+    ssh_passphrase: str | None = None,
+    passphrase_provided: bool = False,
 ) -> tuple[Job, datetime] | str:
-    """Return (job, requested) on success, or an error message."""
+    """Return (job, requested) on success, or an error message.
+
+    If passphrase_provided and ssh_passphrase is non-empty, update it.
+    If passphrase_provided and empty, keep existing.
+    If not passphrase_provided, leave passphrase unchanged unless remote is not SSH.
+    """
     if not path_raw:
         return "Path is required"
 
@@ -240,6 +273,7 @@ def apply_edit_job(
         return "Invalid date or time"
 
     settings = store.load_settings()
+    needs_ssh = gitops.requires_ssh_auth(resolved)
 
     def mutator(jobs: list[Job]) -> list[Job]:
         updated: list[Job] = []
@@ -258,6 +292,12 @@ def apply_edit_job(
             job.path = str(resolved)
             job.requested_at = requested
             job.scheduled_at = scheduled
+            if needs_ssh:
+                if passphrase_provided and ssh_passphrase:
+                    job.ssh_passphrase = ssh_passphrase
+                # blank / omitted → keep existing
+            else:
+                job.ssh_passphrase = None
             updated.append(job)
         if not found:
             return jobs
@@ -289,11 +329,16 @@ class SettingsScreen(JsonEditScreen):
 class AddPushScreen(JsonEditScreen):
     def __init__(self, initial_path: str | None = None) -> None:
         default = default_schedule_time()
-        payload = {
-            "path": initial_path or "",
+        path = initial_path or ""
+        payload: dict[str, Any] = {
+            "path": path,
             "date": default.strftime("%Y-%m-%d"),
             "time": "00:00",
         }
+        # Include passphrase field when the path is already an SSH remote
+        resolved = gitops.resolve_repo_path(path) if path else None
+        if resolved and gitops.requires_ssh_auth(resolved):
+            payload["ssh_passphrase"] = ""
         super().__init__("Schedule a push", dumps_json(payload))
 
     def apply(self, data: dict[str, Any]) -> str | None:
@@ -301,7 +346,16 @@ class AddPushScreen(JsonEditScreen):
         if isinstance(fields, str):
             return fields
         path_raw, date_raw, time_raw = fields
-        result = apply_add_job(path_raw, date_raw, time_raw)
+        pw = read_ssh_passphrase(data)
+        if isinstance(pw, str):
+            return pw
+        _present, passphrase = pw
+        result = apply_add_job(
+            path_raw,
+            date_raw,
+            time_raw,
+            ssh_passphrase=passphrase or None,
+        )
         if isinstance(result, str):
             return result
         added, requested = result
@@ -320,11 +374,14 @@ class EditPushScreen(JsonEditScreen):
     def __init__(self, job: Job) -> None:
         self.job = job
         local = job.requested_at.astimezone()
-        payload = {
+        payload: dict[str, Any] = {
             "path": job.path,
             "date": local.strftime("%Y-%m-%d"),
             "time": local.strftime("%H:%M"),
         }
+        if gitops.requires_ssh_auth(job.path):
+            # Blank = keep stored passphrase (never echo the secret into the buffer)
+            payload["ssh_passphrase"] = ""
         super().__init__("Edit scheduled push", dumps_json(payload))
 
     def apply(self, data: dict[str, Any]) -> str | None:
@@ -332,7 +389,18 @@ class EditPushScreen(JsonEditScreen):
         if isinstance(fields, str):
             return fields
         path_raw, date_raw, time_raw = fields
-        result = apply_edit_job(self.job.id, path_raw, date_raw, time_raw)
+        pw = read_ssh_passphrase(data)
+        if isinstance(pw, str):
+            return pw
+        passphrase_provided, passphrase = pw
+        result = apply_edit_job(
+            self.job.id,
+            path_raw,
+            date_raw,
+            time_raw,
+            ssh_passphrase=passphrase or None,
+            passphrase_provided=passphrase_provided,
+        )
         if isinstance(result, str):
             return result
         edited, requested = result
@@ -351,6 +419,7 @@ class QueueScreen(Screen[None]):
     BINDINGS = [
         Binding("a", "add", "Add"),
         Binding("e", "edit_selected", "Edit"),
+        Binding("r", "run_selected", "Run"),
         Binding("c", "cancel_selected", "Cancel"),
         Binding("s", "settings", "Settings"),
         Binding("q", "quit", "Quit"),
@@ -427,10 +496,10 @@ class QueueScreen(Screen[None]):
 
         pending = pending_jobs(jobs)
         failed = [j for j in jobs if j.status == JobStatus.FAILED]
-        daemon = "running" if launchd.is_loaded() else "stopped"
+        daemon_state = "running" if launchd.is_loaded() else "stopped"
         spacing = store.load_settings().push_spacing_minutes
         self.query_one("#status-bar", Static).update(
-            f"{len(pending)} pending · {len(failed)} failed · daemon {daemon} · spacing {spacing}m"
+            f"{len(pending)} pending · {len(failed)} failed · daemon {daemon_state} · spacing {spacing}m"
         )
 
     def _selected_job_id(self) -> str | None:
@@ -468,6 +537,49 @@ class QueueScreen(Screen[None]):
             self.notify("Only pending jobs can be edited", severity="warning")
             return
         self.app.push_screen(EditPushScreen(job))
+
+    def action_run_selected(self) -> None:
+        self._echo_cmd("r")
+        job_id = self._selected_job_id()
+        if not job_id:
+            self.notify("No job selected", severity="warning")
+            return
+        jobs = store.load_queue()
+        job = next((j for j in jobs if j.id == job_id), None)
+        if job is None:
+            self.notify("Job not found", severity="warning")
+            self.refresh_table()
+            return
+        if job.status not in (JobStatus.PENDING, JobStatus.FAILED):
+            self.notify("Only pending or failed jobs can be run", severity="warning")
+            return
+
+        name = Path(job.path).name
+        now = datetime.now().astimezone()
+
+        def prepare(current: list[Job]) -> list[Job]:
+            updated: list[Job] = []
+            for j in current:
+                if j.id == job_id:
+                    j.status = JobStatus.PENDING
+                    j.last_error = None
+                    j.scheduled_at = now
+                    j.requested_at = now
+                updated.append(j)
+            return updated
+
+        store.update_queue(prepare)
+        self.notify(f"Pushing {name}…")
+        ok = daemon.execute_push(job_id)
+        remaining = store.load_queue()
+        sync_daemon_with_queue(remaining)
+        self.refresh_table()
+        if ok:
+            self.notify(f"Pushed {name}")
+        else:
+            failed = next((j for j in remaining if j.id == job_id), None)
+            err = (failed.last_error if failed else None) or "git push failed"
+            self.notify(f"Push failed: {err[:120]}", severity="error")
 
     def action_settings(self) -> None:
         self._echo_cmd("s")

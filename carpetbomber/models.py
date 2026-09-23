@@ -44,6 +44,7 @@ class Job:
     status: JobStatus = JobStatus.PENDING
     created_at: datetime = field(default_factory=lambda: datetime.now().astimezone())
     last_error: str | None = None
+    ssh_passphrase: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Job:
@@ -52,6 +53,7 @@ class Job:
             status = JobStatus(status_raw)
         except ValueError:
             status = JobStatus.PENDING
+        passphrase = data.get("ssh_passphrase")
         return cls(
             id=str(data.get("id") or uuid4()),
             path=str(data["path"]),
@@ -60,6 +62,7 @@ class Job:
             status=status,
             created_at=_parse_dt(data.get("created_at", datetime.now().astimezone())),
             last_error=data.get("last_error"),
+            ssh_passphrase=str(passphrase) if passphrase is not None else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -71,4 +74,5 @@ class Job:
             "status": self.status.value,
             "created_at": self.created_at.isoformat(),
             "last_error": self.last_error,
+            "ssh_passphrase": self.ssh_passphrase,
         }

@@ -23,16 +23,23 @@ def _log(msg: str) -> None:
     store.append_log(f"[{stamp}] {msg}")
 
 
-def _execute_push(job_id: str) -> None:
+def execute_push(job_id: str) -> bool:
+    """
+    Run git push for a pending job.
+    Returns True on success (job removed), False on failure or if job was not pending.
+    """
+    outcome = {"ok": False}
+
     def mutator(jobs):
         target = next((j for j in jobs if j.id == job_id), None)
         if target is None or target.status != JobStatus.PENDING:
             return jobs
 
         _log(f"pushing {target.path}")
-        result = gitops.git_push(target.path)
+        result = gitops.git_push(target.path, ssh_passphrase=target.ssh_passphrase)
         if result.ok:
             _log(f"ok {target.path}")
+            outcome["ok"] = True
             return [j for j in jobs if j.id != job_id]
 
         err = (result.stderr or result.stdout or "git push failed").strip()
@@ -46,6 +53,11 @@ def _execute_push(job_id: str) -> None:
         return updated
 
     store.update_queue(mutator)
+    return outcome["ok"]
+
+
+# Backwards-compatible alias used by tests / internal callers
+_execute_push = execute_push
 
 
 def run_once_cycle() -> bool:

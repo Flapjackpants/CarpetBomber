@@ -29,6 +29,7 @@ From the queue screen:
 |--------|-----|
 | Add push | `a` |
 | Edit selected | `e` |
+| Run selected now | `r` |
 | Cancel selected | `c` |
 | Settings | `s` |
 | Quit | `q` |
@@ -41,9 +42,11 @@ From the queue screen:
 | INSERT | type to edit; arrows move; `Esc` back to NORMAL |
 | COMMAND | `:w` save, `:wq` save and quit, `:q` quit without saving; `Esc` cancels |
 
-**Add a push:** edit JSON fields `path`, `date` (`YYYY-MM-DD`), and `time` (`HH:MM`). Defaults to **00:00 tomorrow**. CarpetBomber runs `git push` only (no commit).
+**Add a push:** edit JSON fields `path`, `date` (`YYYY-MM-DD`), and `time` (`HH:MM`). Defaults to **00:00 tomorrow**. CarpetBomber runs `git push` only (no commit). If the repo’s upstream is SSH (`git@…` / `ssh://…`), an `ssh_passphrase` field is included — fill it when the key is passphrase-protected (stored on the job in `queue.json`).
 
-**Edit a push:** with a pending job selected, `e` opens the same JSON pre-filled so you can change path and/or schedule time.
+**Edit a push:** with a pending job selected, `e` opens the same JSON pre-filled so you can change path and/or schedule time. When SSH applies, `ssh_passphrase` is shown blank; leave it blank to keep a previously stored value.
+
+**Run now:** with a pending or failed job selected, `r` runs `git push` immediately (failed jobs are re-queued first). Success removes the job; failure keeps it as failed with the error.
 
 **Settings:** edit `push_spacing_minutes` in the JSON buffer, then `:wq`.
 
@@ -56,7 +59,7 @@ From the queue screen:
 Config lives in `~/.config/carpetbomber/`:
 
 - `settings.json` — `push_spacing_minutes`
-- `queue.json` — scheduled jobs
+- `queue.json` — scheduled jobs (including optional `ssh_passphrase`)
 - `daemon.log` — push outcomes
 
 On macOS, when the queue is non-empty, CarpetBomber installs a LaunchAgent at:
