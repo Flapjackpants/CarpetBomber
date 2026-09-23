@@ -6,10 +6,9 @@ from pathlib import Path
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
-    Button,
     DataTable,
     Footer,
     Header,
@@ -38,6 +37,12 @@ def format_dt(value: datetime) -> str:
 
 
 class ConfirmCancelScreen(ModalScreen[bool]):
+    BINDINGS = [
+        Binding("y", "confirm", "Cancel push"),
+        Binding("n", "keep", "Keep"),
+        Binding("escape", "back", "Keep"),
+    ]
+
     CSS = """
     ConfirmCancelScreen {
         align: center middle;
@@ -52,9 +57,10 @@ class ConfirmCancelScreen(ModalScreen[bool]):
     #confirm-box Label {
         margin-bottom: 1;
     }
-    #confirm-buttons {
-        height: auto;
-        align: center middle;
+    #showcmd {
+        height: 1;
+        content-align: right middle;
+        color: $text-muted;
     }
     """
 
@@ -65,17 +71,29 @@ class ConfirmCancelScreen(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-box"):
             yield Label(f"Cancel push for\n{self.job.path}?")
-            with Horizontal(id="confirm-buttons"):
-                yield Button("Cancel push", variant="error", id="yes")
-                yield Button("Keep", variant="primary", id="no")
+            yield Static("", id="showcmd")
+        yield Footer()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id == "yes")
+    def _echo_cmd(self, key: str) -> None:
+        self.query_one("#showcmd", Static).update(key)
+
+    def action_confirm(self) -> None:
+        self._echo_cmd("y")
+        self.dismiss(True)
+
+    def action_keep(self) -> None:
+        self._echo_cmd("n")
+        self.dismiss(False)
+
+    def action_back(self) -> None:
+        self._echo_cmd("esc")
+        self.dismiss(False)
 
 
 class SettingsScreen(Screen[None]):
     BINDINGS = [
-        Binding("escape", "app.pop_screen", "Back"),
+        Binding("ctrl+s", "save", "Save", priority=True),
+        Binding("escape", "back", "Back", priority=True),
     ]
 
     CSS = """
@@ -97,6 +115,12 @@ class SettingsScreen(Screen[None]):
         color: $text-muted;
         margin-top: 1;
     }
+    #showcmd {
+        height: 1;
+        padding: 0 2;
+        content-align: right middle;
+        color: $text-muted;
+    }
     """
 
     def compose(self) -> ComposeResult:
@@ -113,30 +137,40 @@ class SettingsScreen(Screen[None]):
                     type="integer",
                 )
                 yield Label(f"Config directory: {store.config_dir()}", id="settings-path")
-                with Horizontal():
-                    yield Button("Save", variant="primary", id="save")
-                    yield Button("Back", id="back")
+        yield Static("", id="showcmd")
         yield Footer()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "back":
-            self.app.pop_screen()
+    def _echo_cmd(self, key: str) -> None:
+        self.query_one("#showcmd", Static).update(key)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._echo_cmd("↵")
+        self._save()
+
+    def action_save(self) -> None:
+        self._echo_cmd("^s")
+        self._save()
+
+    def action_back(self) -> None:
+        self._echo_cmd("esc")
+        self.app.pop_screen()
+
+    def _save(self) -> None:
+        raw = self.query_one("#spacing", Input).value.strip() or "1"
+        try:
+            spacing = max(1, int(raw))
+        except ValueError:
+            self.notify("Spacing must be a positive integer", severity="error")
             return
-        if event.button.id == "save":
-            raw = self.query_one("#spacing", Input).value.strip() or "1"
-            try:
-                spacing = max(1, int(raw))
-            except ValueError:
-                self.notify("Spacing must be a positive integer", severity="error")
-                return
-            store.save_settings(Settings(push_spacing_minutes=spacing))
-            self.notify(f"Saved spacing: {spacing} minute(s)")
-            self.app.pop_screen()
+        store.save_settings(Settings(push_spacing_minutes=spacing))
+        self.notify(f"Saved spacing: {spacing} minute(s)")
+        self.app.pop_screen()
 
 
 class AddPushScreen(Screen[None]):
     BINDINGS = [
-        Binding("escape", "app.pop_screen", "Back"),
+        Binding("ctrl+s", "submit", "Add", priority=True),
+        Binding("escape", "back", "Back", priority=True),
     ]
 
     CSS = """
@@ -158,6 +192,12 @@ class AddPushScreen(Screen[None]):
         color: $text-muted;
         margin-bottom: 1;
     }
+    #showcmd {
+        height: 1;
+        padding: 0 2;
+        content-align: right middle;
+        color: $text-muted;
+    }
     """
 
     def compose(self) -> ComposeResult:
@@ -177,17 +217,23 @@ class AddPushScreen(Screen[None]):
                 yield Input(placeholder=default.strftime("%Y-%m-%d"), id="date")
                 yield Label("Time (HH:MM)")
                 yield Input(placeholder="00:00", id="time")
-                with Horizontal():
-                    yield Button("Add", variant="primary", id="add")
-                    yield Button("Back", id="back")
+        yield Static("", id="showcmd")
         yield Footer()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "back":
-            self.app.pop_screen()
-            return
-        if event.button.id == "add":
-            self._submit()
+    def _echo_cmd(self, key: str) -> None:
+        self.query_one("#showcmd", Static).update(key)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._echo_cmd("↵")
+        self._submit()
+
+    def action_back(self) -> None:
+        self._echo_cmd("esc")
+        self.app.pop_screen()
+
+    def action_submit(self) -> None:
+        self._echo_cmd("^s")
+        self._submit()
 
     def _submit(self) -> None:
         path_raw = self.query_one("#path", Input).value.strip()
@@ -293,9 +339,11 @@ class QueueScreen(Screen[None]):
         padding: 0 2;
         color: $text-muted;
     }
-    #actions {
-        height: auto;
-        padding: 1 1;
+    #showcmd {
+        height: 1;
+        padding: 0 2;
+        content-align: right middle;
+        color: $text-muted;
     }
     """
 
@@ -305,12 +353,7 @@ class QueueScreen(Screen[None]):
         with Vertical(id="table-wrap"):
             yield DataTable(id="queue-table", cursor_type="row", zebra_stripes=True)
         yield Static("", id="status-bar")
-        with Horizontal(id="actions"):
-            yield Button("Add push", variant="primary", id="btn-add")
-            yield Button("Cancel selected", id="btn-cancel")
-            yield Button("Settings", id="btn-settings")
-            yield Button("Refresh", id="btn-refresh")
-            yield Button("Quit", id="btn-quit")
+        yield Static("", id="showcmd")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -363,26 +406,20 @@ class QueueScreen(Screen[None]):
             return None
         return str(row_key.value)
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        match event.button.id:
-            case "btn-add":
-                self.action_add()
-            case "btn-cancel":
-                self.action_cancel_selected()
-            case "btn-settings":
-                self.action_settings()
-            case "btn-refresh":
-                self.action_refresh()
-            case "btn-quit":
-                self.action_quit()
+    def _echo_cmd(self, key: str) -> None:
+        self.query_one("#showcmd", Static).update(key)
 
     def action_add(self) -> None:
+        self._echo_cmd("a")
         self.app.push_screen(AddPushScreen())
 
     def action_settings(self) -> None:
+        self._echo_cmd("s")
         self.app.push_screen(SettingsScreen())
 
     def action_refresh(self) -> None:
+        self._echo_cmd("r")
+
         def mutator(jobs: list[Job]) -> list[Job]:
             kept, _cancelled = validate.revalidate_queue(jobs)
             return kept
@@ -393,6 +430,7 @@ class QueueScreen(Screen[None]):
         self.notify("Queue refreshed")
 
     def action_cancel_selected(self) -> None:
+        self._echo_cmd("c")
         job_id = self._selected_job_id()
         if not job_id:
             self.notify("No job selected", severity="warning")
@@ -419,6 +457,7 @@ class QueueScreen(Screen[None]):
         self.app.push_screen(ConfirmCancelScreen(job), on_confirm)
 
     def action_quit(self) -> None:
+        self._echo_cmd("q")
         self.app.exit()
 
 
@@ -440,10 +479,6 @@ class CarpetBomberApp(App[None]):
     }
     Footer {
         background: #1a2332;
-    }
-    Button {
-        margin-right: 1;
-        margin-left: 1;
     }
     DataTable > .datatable--cursor {
         background: #2a4a6a;
