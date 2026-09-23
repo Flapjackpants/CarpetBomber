@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "carpetbomber"
+version = "0.1.0"
+description = "Schedule git pushes for later; runs in the background on macOS"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "textual>=0.80.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+CarpetBomber = "carpetbomber.app:main"
+carpetbomber-daemon = "carpetbomber.daemon:main"
+
+[tool.setuptools.packages.find]
+include = ["carpetbomber*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
