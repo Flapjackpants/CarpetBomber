@@ -326,9 +326,7 @@ class QueueScreen(Screen[None]):
         self.refresh_table()
 
     def _refresh_banner(self) -> None:
-        # Account for #banner horizontal padding (0 2).
-        width = max(0, self.size.width - 4)
-        self.query_one("#banner", Static).update(render_title(width))
+        self.query_one("#banner", Static).update(render_title())
 
     def refresh_table(self) -> None:
         table = self.query_one("#queue-table", DataTable)
