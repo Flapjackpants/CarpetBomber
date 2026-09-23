@@ -4,17 +4,30 @@ Schedule `git push` jobs for later. The interactive TUI manages the queue; a mac
 
 ## Install
 
+Install from GitHub without cloning (requires `sudo`, `curl`, and Python 3.11+):
+
 ```bash
+curl -fsSL https://raw.githubusercontent.com/Flapjackpants/CarpetBomber/main/download.sh | bash
+```
+
+This creates a venv in `/Applications/CarpetBomber`, `pip install`s the package from GitHub’s source archive, and links:
+
+- `CarpetBomber` — Textual TUI
+- `carpetbomber-daemon` — background worker (normally started via LaunchAgent)
+
+into `/usr/local/bin` so you can run them from anywhere.
+
+### Development install
+
+```bash
+git clone https://github.com/Flapjackpants/CarpetBomber.git
 cd CarpetBomber
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -i https://pypi.org/simple -e ".[dev]"
 ```
 
-This installs two commands:
-
-- `CarpetBomber` — Textual TUI
-- `carpetbomber-daemon` — background worker (normally started via LaunchAgent)
+Or from a local checkout, run `./download.sh` to install the same system layout as the curl one-liner.
 
 ## Usage
 
