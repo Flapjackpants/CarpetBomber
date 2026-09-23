@@ -136,6 +136,16 @@ def bootout() -> None:
 
 
 def ensure_daemon_running() -> None:
+    """Start the LaunchAgent if it is not already loaded.
+
+    Avoid bootout/restart when already running — that kills the daemon mid-sleep
+    and can leave scheduled pushes stranded until the next TUI session.
+    """
+    if sys.platform != "darwin":
+        return
+    write_plist()
+    if is_loaded():
+        return
     bootstrap()
 
 

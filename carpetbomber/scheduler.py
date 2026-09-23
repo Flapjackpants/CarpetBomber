@@ -83,6 +83,15 @@ def pending_jobs(jobs: list[Job]) -> list[Job]:
     return [j for j in jobs if j.status == JobStatus.PENDING]
 
 
+def pushing_jobs(jobs: list[Job]) -> list[Job]:
+    return [j for j in jobs if j.status == JobStatus.PUSHING]
+
+
+def active_jobs(jobs: list[Job]) -> list[Job]:
+    """Jobs that keep the daemon alive: pending (not yet run) or pushing (in flight)."""
+    return [j for j in jobs if j.status in (JobStatus.PENDING, JobStatus.PUSHING)]
+
+
 def overdue_jobs(jobs: list[Job], now: datetime | None = None) -> list[Job]:
     now = now or datetime.now().astimezone()
     overdue = [j for j in pending_jobs(jobs) if j.scheduled_at <= now]

@@ -59,3 +59,55 @@ def test_overdue_helper_used_for_ordering():
         ),
     ]
     assert [j.path for j in overdue_jobs(jobs, now)] == ["/a", "/b"]
+
+
+def test_daemon_keeps_alive_for_pushing_only(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CARPETBOMBER_CONFIG_DIR", str(tmp_path))
+    from carpetbomber import daemon, store
+
+    job = Job(
+        path="/repo",
+        scheduled_at=datetime(2026, 9, 24, 0, 0, tzinfo=TZ),
+        requested_at=datetime(2026, 9, 24, 0, 0, tzinfo=TZ),
+        status=JobStatus.PUSHING,
+    )
+    store.save_queue([job])
+
+    with patch.object(daemon, "_log"), patch.object(daemon.time, "sleep"):
+        assert daemon.run_once_cycle() is True
+
+
+def test_recover_stale_pushing(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CARPETBOMBER_CONFIG_DIR", str(tmp_path))
+    from carpetbomber import daemon, store
+
+    job = Job(
+        path="/repo",
+        scheduled_at=datetime(2026, 9, 24, 0, 0, tzinfo=TZ),
+        requested_at=datetime(2026, 9, 24, 0, 0, tzinfo=TZ),
+        status=JobStatus.PUSHING,
+    )
+    store.save_queue([job])
+    assert daemon.recover_stale_pushing() == 1
+    remaining = store.load_queue()
+    assert len(remaining) == 1
+    assert remaining[0].status == JobStatus.PENDING
+    assert daemon.recover_stale_pushing() == 0
+
+
+def test_overdue_skips_pushing_jobs():
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=TZ)
+    jobs = [
+        Job(
+            path="/pushing",
+            scheduled_at=datetime(2026, 9, 24, 10, 0, tzinfo=TZ),
+            requested_at=datetime(2026, 9, 24, 10, 0, tzinfo=TZ),
+            status=JobStatus.PUSHING,
+        ),
+        Job(
+            path="/pending",
+            scheduled_at=datetime(2026, 9, 24, 11, 0, tzinfo=TZ),
+            requested_at=datetime(2026, 9, 24, 11, 0, tzinfo=TZ),
+        ),
+    ]
+    assert [j.path for j in overdue_jobs(jobs, now)] == ["/pending"]

@@ -46,7 +46,9 @@ From the queue screen:
 
 **Edit a push:** with a pending job selected, `e` opens the same JSON pre-filled so you can change path and/or schedule time. When SSH applies, `ssh_passphrase` is shown blank; leave it blank to keep a previously stored value.
 
-**Run now:** with a pending or failed job selected, `r` runs `git push` immediately (failed jobs are re-queued first). Success removes the job; failure keeps it as failed with the error.
+**Run now:** with a pending or failed job selected, `r` runs `git push` immediately (failed jobs are re-queued first). A loading screen is shown while the push runs. Success removes the job; failure keeps it as failed with the error.
+
+**While the TUI is open**, CarpetBomber runs due pushes itself (no background polling). When a scheduled time arrives, the loading screen appears, then the job is removed on success or marked failed. The LaunchAgent daemon is paused while the TUI is open and restarted on quit if pending jobs remain.
 
 **Settings:** edit `push_spacing_minutes` in the JSON buffer, then `:wq`.
 

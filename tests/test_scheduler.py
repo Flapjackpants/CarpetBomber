@@ -7,11 +7,13 @@ import pytest
 
 from carpetbomber.models import Job, JobStatus, Settings
 from carpetbomber.scheduler import (
+    active_jobs,
     catch_up_start_times,
     default_schedule_time,
     next_free_slot,
     overdue_jobs,
     parse_user_datetime,
+    pushing_jobs,
 )
 
 
@@ -84,6 +86,16 @@ def test_overdue_jobs_ordered_by_schedule():
     ]
     overdue = overdue_jobs(jobs, now)
     assert [j.path for j in overdue] == ["/late1", "/late2"]
+
+
+def test_active_and_pushing_helpers():
+    jobs = [
+        _job("/p", _dt(2026, 9, 24, 0, 0)),
+        _job("/x", _dt(2026, 9, 24, 0, 1), status=JobStatus.PUSHING),
+        _job("/f", _dt(2026, 9, 24, 0, 2), status=JobStatus.FAILED),
+    ]
+    assert [j.path for j in pushing_jobs(jobs)] == ["/x"]
+    assert [j.path for j in active_jobs(jobs)] == ["/p", "/x"]
 
 
 def test_catch_up_start_times_spaced_from_now():

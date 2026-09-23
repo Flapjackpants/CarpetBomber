@@ -17,18 +17,28 @@ from textual.widgets import (
     Label,
     Static,
 )
+from textual import work
 
 from carpetbomber import daemon, gitops, launchd, store
 from carpetbomber.banner import render_title
 from carpetbomber.models import Job, JobStatus, Settings
-from carpetbomber.scheduler import default_schedule_time, next_free_slot, parse_user_datetime, pending_jobs
+from carpetbomber.scheduler import (
+    active_jobs,
+    default_schedule_time,
+    next_due_job,
+    next_free_slot,
+    overdue_jobs,
+    parse_user_datetime,
+    pending_jobs,
+    pushing_jobs,
+)
 from carpetbomber.vim_buffer import VimBuffer
 
 
 def sync_daemon_with_queue(jobs: list[Job] | None = None) -> None:
-    """Start LaunchAgent when pending jobs exist; stop it when none remain."""
+    """Start LaunchAgent when pending/pushing jobs exist; stop it when none remain."""
     jobs = jobs if jobs is not None else store.load_queue()
-    if pending_jobs(jobs):
+    if active_jobs(jobs):
         launchd.ensure_daemon_running()
     else:
         launchd.stop_daemon()
@@ -105,6 +115,37 @@ class ConfirmCancelScreen(ModalScreen[bool]):
     def action_back(self) -> None:
         self._echo_cmd("esc")
         self.dismiss(False)
+
+
+class PushingScreen(ModalScreen[None]):
+    """Non-dismissible loading modal shown while a git push is in flight."""
+
+    CSS = """
+    PushingScreen {
+        align: center middle;
+    }
+    #pushing-box {
+        width: 60;
+        height: auto;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    #pushing-box Label {
+        text-align: center;
+        width: 100%;
+    }
+    """
+
+    def __init__(self, path: str) -> None:
+        super().__init__()
+        self.path = path
+
+    def compose(self) -> ComposeResult:
+        name = Path(self.path).name
+        with Vertical(id="pushing-box"):
+            yield Label(f"Pushing {name}…")
+            yield Label(self.path)
 
 
 class JsonEditScreen(Screen[None]):
@@ -238,7 +279,6 @@ def apply_add_job(
         return list(jobs) + [job]
 
     new_jobs = store.update_queue(mutator)
-    sync_daemon_with_queue(new_jobs)
 
     added = next((j for j in new_jobs if j.id == new_job_id), None)
     if added is None:
@@ -304,7 +344,6 @@ def apply_edit_job(
         return updated
 
     new_jobs = store.update_queue(mutator)
-    sync_daemon_with_queue(new_jobs)
 
     edited = next((j for j in new_jobs if j.id == job_id), None)
     if edited is None:
@@ -455,6 +494,12 @@ class QueueScreen(Screen[None]):
     }
     """
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._loading_job_id: str | None = None
+        self._schedule_timer = None
+        self._spacing_after_push = False
+
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static(id="banner")
@@ -467,20 +512,107 @@ class QueueScreen(Screen[None]):
     def on_mount(self) -> None:
         table = self.query_one("#queue-table", DataTable)
         table.add_columns("Path", "Requested", "Scheduled", "Status", "Error")
+        # While the TUI is open it owns push execution — pause LaunchAgent to avoid races
+        launchd.stop_daemon()
+        n = daemon.recover_stale_pushing()
+        if n:
+            self.notify(f"Recovered {n} interrupted push(es)", severity="warning")
         self._refresh_banner()
         self.refresh_table()
+        self._arm_next_push()
 
     def on_resize(self, event) -> None:
         self._refresh_banner()
 
     def on_screen_resume(self) -> None:
         self.refresh_table()
+        self._arm_next_push()
+
+    def on_unmount(self) -> None:
+        self._cancel_schedule_timer()
 
     def _refresh_banner(self) -> None:
         self.query_one("#banner", Static).update(render_title())
 
+    def _cancel_schedule_timer(self) -> None:
+        if self._schedule_timer is not None:
+            self._schedule_timer.stop()
+            self._schedule_timer = None
+
+    def _arm_next_push(self) -> None:
+        """Schedule a one-shot timer for the next due push (no polling)."""
+        self._cancel_schedule_timer()
+        if self._loading_job_id is not None:
+            return
+
+        jobs = store.load_queue()
+        now = datetime.now().astimezone()
+        overdue = overdue_jobs(jobs, now)
+        if overdue:
+            delay = 0.05
+            if self._spacing_after_push:
+                spacing = max(1, store.load_settings().push_spacing_minutes)
+                delay = float(spacing * 60)
+            self._spacing_after_push = False
+            self._schedule_timer = self.set_timer(delay, self._on_schedule_fire)
+            return
+
+        self._spacing_after_push = False
+        nxt = next_due_job(jobs, now)
+        if nxt is None:
+            return
+        delay = max(0.05, (nxt.scheduled_at - now).total_seconds())
+        self._schedule_timer = self.set_timer(delay, self._on_schedule_fire)
+
+    def _on_schedule_fire(self) -> None:
+        self._schedule_timer = None
+        if self._loading_job_id is not None:
+            return
+        jobs = store.load_queue()
+        now = datetime.now().astimezone()
+        overdue = overdue_jobs(jobs, now)
+        if not overdue:
+            # Not due yet (clock / schedule changed) — re-arm for the next slot
+            self._arm_next_push()
+            return
+        job = overdue[0]
+        self._begin_push(job.id, job.path)
+
+    def _show_loading(self, job_id: str, path: str) -> None:
+        if self._loading_job_id == job_id:
+            return
+        if self._loading_job_id is not None:
+            self._dismiss_loading()
+        self._loading_job_id = job_id
+        self.app.push_screen(PushingScreen(path))
+
+    def _dismiss_loading(self) -> None:
+        if self._loading_job_id is None:
+            return
+        self._loading_job_id = None
+        if isinstance(self.app.screen, PushingScreen):
+            self.app.pop_screen()
+
+    def _begin_push(self, job_id: str, path: str) -> None:
+        """Show loading and run git push off the UI thread."""
+        if self._loading_job_id is not None:
+            return
+        self._cancel_schedule_timer()
+        name = Path(path).name
+        self._show_loading(job_id, path)
+        self.refresh_table()
+        self._run_push_worker(job_id, name)
+
     def refresh_table(self) -> None:
         table = self.query_one("#queue-table", DataTable)
+        # Preserve cursor across rebuilds when possible
+        prev_key = None
+        if table.row_count > 0:
+            try:
+                prev_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            except Exception:
+                prev_key = None
+
         table.clear()
         jobs = store.load_queue()
         for job in sorted(jobs, key=lambda j: (j.scheduled_at, j.created_at)):
@@ -494,13 +626,23 @@ class QueueScreen(Screen[None]):
                 key=job.id,
             )
 
+        if prev_key is not None:
+            try:
+                table.move_cursor(row=table.get_row_index(prev_key))
+            except Exception:
+                pass
+
         pending = pending_jobs(jobs)
+        pushing = pushing_jobs(jobs)
         failed = [j for j in jobs if j.status == JobStatus.FAILED]
-        daemon_state = "running" if launchd.is_loaded() else "stopped"
         spacing = store.load_settings().push_spacing_minutes
-        self.query_one("#status-bar", Static).update(
-            f"{len(pending)} pending · {len(failed)} failed · daemon {daemon_state} · spacing {spacing}m"
-        )
+        parts = [f"{len(pending)} pending"]
+        if pushing:
+            parts.append(f"{len(pushing)} pushing")
+        parts.append(f"{len(failed)} failed")
+        parts.append("daemon paused")
+        parts.append(f"spacing {spacing}m")
+        self.query_one("#status-bar", Static).update(" · ".join(parts))
 
     def _selected_job_id(self) -> str | None:
         table = self.query_one("#queue-table", DataTable)
@@ -540,6 +682,9 @@ class QueueScreen(Screen[None]):
 
     def action_run_selected(self) -> None:
         self._echo_cmd("r")
+        if self._loading_job_id is not None:
+            self.notify("A push is already in progress", severity="warning")
+            return
         job_id = self._selected_job_id()
         if not job_id:
             self.notify("No job selected", severity="warning")
@@ -554,7 +699,7 @@ class QueueScreen(Screen[None]):
             self.notify("Only pending or failed jobs can be run", severity="warning")
             return
 
-        name = Path(job.path).name
+        path = job.path
         now = datetime.now().astimezone()
 
         def prepare(current: list[Job]) -> list[Job]:
@@ -569,10 +714,17 @@ class QueueScreen(Screen[None]):
             return updated
 
         store.update_queue(prepare)
-        self.notify(f"Pushing {name}…")
+        self._begin_push(job_id, path)
+
+    @work(thread=True, exclusive=True, group="push")
+    def _run_push_worker(self, job_id: str, name: str) -> None:
         ok = daemon.execute_push(job_id)
+        self.app.call_from_thread(self._finish_push, job_id, name, ok)
+
+    def _finish_push(self, job_id: str, name: str, ok: bool) -> None:
         remaining = store.load_queue()
-        sync_daemon_with_queue(remaining)
+        if self._loading_job_id == job_id:
+            self._dismiss_loading()
         self.refresh_table()
         if ok:
             self.notify(f"Pushed {name}")
@@ -580,6 +732,12 @@ class QueueScreen(Screen[None]):
             failed = next((j for j in remaining if j.id == job_id), None)
             err = (failed.last_error if failed else None) or "git push failed"
             self.notify(f"Push failed: {err[:120]}", severity="error")
+
+        # Space catch-up pushes when more overdue work remains
+        now = datetime.now().astimezone()
+        if overdue_jobs(remaining, now):
+            self._spacing_after_push = True
+        self._arm_next_push()
 
     def action_settings(self) -> None:
         self._echo_cmd("s")
@@ -605,9 +763,9 @@ class QueueScreen(Screen[None]):
             def mutator(current: list[Job]) -> list[Job]:
                 return [j for j in current if j.id != job_id]
 
-            new_jobs = store.update_queue(mutator)
-            sync_daemon_with_queue(new_jobs)
+            store.update_queue(mutator)
             self.refresh_table()
+            self._arm_next_push()
             self.notify("Cancelled")
 
         self.app.push_screen(ConfirmCancelScreen(job), on_confirm)
@@ -672,6 +830,10 @@ class CarpetBomberApp(App[None]):
         self.push_screen(QueueScreen())
         if self.initial_add_path is not None:
             self.push_screen(AddPushScreen(initial_path=self.initial_add_path))
+
+    def on_unmount(self) -> None:
+        # Hand remaining pending jobs back to the LaunchAgent daemon
+        sync_daemon_with_queue()
 
 
 def main() -> None:

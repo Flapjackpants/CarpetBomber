@@ -9,6 +9,7 @@ from uuid import uuid4
 
 class JobStatus(str, Enum):
     PENDING = "pending"
+    PUSHING = "pushing"
     FAILED = "failed"
     DONE = "done"
 

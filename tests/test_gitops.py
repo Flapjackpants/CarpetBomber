@@ -192,3 +192,50 @@ def test_execute_push_records_failure(tmp_path: Path, monkeypatch):
     assert len(remaining) == 1
     assert remaining[0].status == JobStatus.FAILED
     assert remaining[0].last_error == "permission denied"
+
+
+def test_execute_push_sets_pushing_during_git(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CARPETBOMBER_CONFIG_DIR", str(tmp_path))
+    from carpetbomber import daemon, store
+
+    job = Job(
+        path="/repo",
+        scheduled_at=datetime(2026, 9, 24, 0, 0, tzinfo=TZ),
+        requested_at=datetime(2026, 9, 24, 0, 0, tzinfo=TZ),
+    )
+    store.save_queue([job])
+    seen_during: list[JobStatus] = []
+
+    def slow_push(path, ssh_passphrase=None):
+        mid = store.load_queue()
+        assert len(mid) == 1
+        seen_during.append(mid[0].status)
+        return GitResult(ok=True, stdout="", stderr="", returncode=0)
+
+    with patch.object(daemon, "_log"), patch.object(gitops, "git_push", side_effect=slow_push):
+        assert daemon.execute_push(job.id) is True
+
+    assert seen_during == [JobStatus.PUSHING]
+    assert store.load_queue() == []
+
+
+def test_execute_push_skips_already_pushing(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CARPETBOMBER_CONFIG_DIR", str(tmp_path))
+    from carpetbomber import daemon, store
+
+    job = Job(
+        path="/repo",
+        scheduled_at=datetime(2026, 9, 24, 0, 0, tzinfo=TZ),
+        requested_at=datetime(2026, 9, 24, 0, 0, tzinfo=TZ),
+        status=JobStatus.PUSHING,
+    )
+    store.save_queue([job])
+    mock_push = MagicMock()
+
+    with patch.object(daemon, "_log"), patch.object(gitops, "git_push", mock_push):
+        assert daemon.execute_push(job.id) is False
+
+    mock_push.assert_not_called()
+    remaining = store.load_queue()
+    assert len(remaining) == 1
+    assert remaining[0].status == JobStatus.PUSHING
