@@ -27,12 +27,15 @@ From the queue screen:
 | Action | Key |
 |--------|-----|
 | Add push | `a` |
+| Edit selected | `e` |
 | Cancel selected | `c` |
 | Settings | `s` |
 | Refresh / revalidate | `r` |
 | Quit | `q` |
 
 **Add a push:** give a git repo path, optional date (`YYYY-MM-DD`) and time (`HH:MM`). Defaults to **00:00 tomorrow**. CarpetBomber runs `git push` only (no commit).
+
+**Edit a push:** with a pending job selected, `e` opens the same fields pre-filled so you can change path and/or schedule time.
 
 **Same-time collisions:** if that minute is taken, the job is placed on the next free slot stepped by **push spacing** (default 1 minute), configurable in Settings.
 

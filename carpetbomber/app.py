@@ -308,9 +308,167 @@ class AddPushScreen(Screen[None]):
         self.app.pop_screen()
 
 
+class EditPushScreen(Screen[None]):
+    BINDINGS = [
+        Binding("ctrl+s", "submit", "Save", priority=True),
+        Binding("escape", "back", "Back", priority=True),
+    ]
+
+    CSS = """
+    EditPushScreen {
+        padding: 1 2;
+    }
+    #edit-form {
+        width: 80;
+        max-width: 100%;
+        height: auto;
+        border: solid $accent;
+        padding: 1 2;
+        background: $surface;
+    }
+    #edit-form Input {
+        margin-bottom: 1;
+    }
+    #hint {
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+    #showcmd {
+        height: 1;
+        padding: 0 2;
+        content-align: right middle;
+        color: $text-muted;
+    }
+    """
+
+    def __init__(self, job: Job) -> None:
+        super().__init__()
+        self.job = job
+
+    def compose(self) -> ComposeResult:
+        local = self.job.requested_at.astimezone()
+        yield Header()
+        with VerticalScroll():
+            yield Static("Edit scheduled push", classes="title")
+            yield Label(
+                "Change path and/or date/time. Ctrl+S to save.",
+                id="hint",
+            )
+            with Vertical(id="edit-form"):
+                yield Label("Repository path")
+                yield Input(value=self.job.path, placeholder="/path/to/repo", id="path")
+                yield Label("Date (YYYY-MM-DD)")
+                yield Input(value=local.strftime("%Y-%m-%d"), id="date")
+                yield Label("Time (HH:MM)")
+                yield Input(value=local.strftime("%H:%M"), id="time")
+        yield Static("", id="showcmd")
+        yield Footer()
+
+    def _echo_cmd(self, key: str) -> None:
+        self.query_one("#showcmd", Static).update(key)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._echo_cmd("↵")
+        self._submit()
+
+    def action_back(self) -> None:
+        self._echo_cmd("esc")
+        self.app.pop_screen()
+
+    def action_submit(self) -> None:
+        self._echo_cmd("^s")
+        self._submit()
+
+    def _submit(self) -> None:
+        path_raw = self.query_one("#path", Input).value.strip()
+        date_raw = self.query_one("#date", Input).value.strip()
+        time_raw = self.query_one("#time", Input).value.strip()
+
+        if not path_raw:
+            self.notify("Path is required", severity="error")
+            return
+
+        resolved = gitops.resolve_repo_path(path_raw)
+        if resolved is None:
+            self.notify("Not a git repository", severity="error")
+            return
+
+        if not gitops.has_something_to_push(resolved):
+            self.notify(
+                "Nothing to push (no unpushed commits / no upstream)",
+                severity="error",
+            )
+            return
+
+        try:
+            requested = parse_user_datetime(date_raw, time_raw)
+        except (ValueError, IndexError):
+            self.notify("Invalid date or time", severity="error")
+            return
+
+        settings = store.load_settings()
+        job_id = self.job.id
+        cancelled_paths: list[str] = []
+
+        def mutator(jobs: list[Job]) -> list[Job]:
+            nonlocal cancelled_paths
+            updated: list[Job] = []
+            found = False
+            for job in jobs:
+                if job.id != job_id:
+                    updated.append(job)
+                    continue
+                found = True
+                scheduled = next_free_slot(
+                    requested,
+                    jobs,
+                    settings.push_spacing_minutes,
+                    exclude_id=job_id,
+                )
+                job.path = str(resolved)
+                job.requested_at = requested
+                job.scheduled_at = scheduled
+                updated.append(job)
+            if not found:
+                return jobs
+            kept, cancelled = validate.revalidate_queue(updated)
+            cancelled_paths = [c.path for c in cancelled]
+            return kept
+
+        new_jobs = store.update_queue(mutator)
+        sync_daemon_with_queue(new_jobs)
+
+        if cancelled_paths:
+            names = ", ".join(Path(p).name for p in cancelled_paths[:3])
+            more = f" (+{len(cancelled_paths) - 3})" if len(cancelled_paths) > 3 else ""
+            self.notify(
+                f"Cancelled {len(cancelled_paths)} with nothing to push: {names}{more}",
+                severity="warning",
+            )
+
+        edited = next((j for j in new_jobs if j.id == job_id), None)
+        if edited is None:
+            self.notify(
+                "Push removed — nothing left to push after validation",
+                severity="warning",
+            )
+        else:
+            extra = ""
+            req = requested.replace(second=0, microsecond=0)
+            got = edited.scheduled_at.replace(second=0, microsecond=0)
+            if got != req:
+                extra = f" (slot adjusted to {format_dt(edited.scheduled_at)})"
+            self.notify(
+                f"Updated {Path(edited.path).name} for {format_dt(edited.scheduled_at)}{extra}"
+            )
+
+        self.app.pop_screen()
+
+
 class QueueScreen(Screen[None]):
     BINDINGS = [
         Binding("a", "add", "Add"),
+        Binding("e", "edit_selected", "Edit"),
         Binding("c", "cancel_selected", "Cancel"),
         Binding("s", "settings", "Settings"),
         Binding("r", "refresh", "Refresh"),
@@ -412,6 +570,23 @@ class QueueScreen(Screen[None]):
     def action_add(self) -> None:
         self._echo_cmd("a")
         self.app.push_screen(AddPushScreen())
+
+    def action_edit_selected(self) -> None:
+        self._echo_cmd("e")
+        job_id = self._selected_job_id()
+        if not job_id:
+            self.notify("No job selected", severity="warning")
+            return
+        jobs = store.load_queue()
+        job = next((j for j in jobs if j.id == job_id), None)
+        if job is None:
+            self.notify("Job not found", severity="warning")
+            self.refresh_table()
+            return
+        if job.status != JobStatus.PENDING:
+            self.notify("Only pending jobs can be edited", severity="warning")
+            return
+        self.app.push_screen(EditPushScreen(job))
 
     def action_settings(self) -> None:
         self._echo_cmd("s")

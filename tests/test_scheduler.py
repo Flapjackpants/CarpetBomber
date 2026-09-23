@@ -58,6 +58,24 @@ def test_next_free_slot_respects_spacing():
     )
 
 
+def test_next_free_slot_exclude_id_keeps_own_slot():
+    job_a = _job("/a", _dt(2026, 9, 24, 0, 0))
+    job_b = _job("/b", _dt(2026, 9, 24, 0, 1))
+    jobs = [job_a, job_b]
+    assert next_free_slot(
+        _dt(2026, 9, 24, 0, 0),
+        jobs,
+        spacing_minutes=1,
+        exclude_id=job_a.id,
+    ) == _dt(2026, 9, 24, 0, 0)
+    assert next_free_slot(
+        _dt(2026, 9, 24, 0, 1),
+        jobs,
+        spacing_minutes=1,
+        exclude_id=job_a.id,
+    ) == _dt(2026, 9, 24, 0, 2)
+
+
 def test_overdue_jobs_ordered_by_schedule():
     now = _dt(2026, 9, 24, 1, 0)
     jobs = [
