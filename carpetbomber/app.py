@@ -9,12 +9,11 @@ from typing import Any
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.screen import ModalScreen, Screen
+from textual.screen import Screen
 from textual.widgets import (
     DataTable,
     Footer,
     Header,
-    Label,
     Static,
 )
 from textual import work
@@ -61,37 +60,6 @@ def parse_editor_json(text: str) -> dict[str, Any] | str:
     if not isinstance(data, dict):
         return "JSON root must be an object"
     return data
-
-
-class PushingScreen(ModalScreen[None]):
-    """Non-dismissible loading modal shown while a git push is in flight."""
-
-    CSS = """
-    PushingScreen {
-        align: center middle;
-    }
-    #pushing-box {
-        width: 60;
-        height: auto;
-        border: thick $accent;
-        background: $surface;
-        padding: 1 2;
-    }
-    #pushing-box Label {
-        text-align: center;
-        width: 100%;
-    }
-    """
-
-    def __init__(self, path: str) -> None:
-        super().__init__()
-        self.path = path
-
-    def compose(self) -> ComposeResult:
-        name = Path(self.path).name
-        with Vertical(id="pushing-box"):
-            yield Label(f"Pushing {name}…")
-            yield Label(self.path)
 
 
 class JsonEditScreen(Screen[None]):
@@ -450,11 +418,18 @@ class QueueScreen(Screen[None]):
     def __init__(self) -> None:
         super().__init__()
         self._loading_job_id: str | None = None
+        self._loading_name: str | None = None
+        self._loading_frame = 0
+        self._loading_timer = None
         self._schedule_timer = None
         self._spacing_after_push = False
         self._cancel_confirm_id: str | None = None
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if self._loading_job_id is not None and action in (
+            self._NORMAL_ACTIONS | self._CONFIRM_ACTIONS
+        ):
+            return False
         confirming = self._cancel_confirm_id is not None
         if action in self._CONFIRM_ACTIONS:
             return confirming
@@ -492,6 +467,7 @@ class QueueScreen(Screen[None]):
 
     def on_unmount(self) -> None:
         self._cancel_schedule_timer()
+        self._cancel_loading_timer()
 
     def _refresh_banner(self) -> None:
         self.query_one("#banner", Static).update(render_title())
@@ -546,14 +522,35 @@ class QueueScreen(Screen[None]):
         if self._loading_job_id is not None:
             self._dismiss_loading()
         self._loading_job_id = job_id
-        self.app.push_screen(PushingScreen(path))
+        self._loading_name = Path(path).name
+        self._loading_frame = 0
+        self._update_loading_status()
+        self._loading_timer = self.set_interval(0.15, self._advance_loading)
+
+    def _update_loading_status(self) -> None:
+        frames = "|/-\\"
+        frame = frames[self._loading_frame % len(frames)]
+        name = self._loading_name or "push"
+        self.query_one("#status-bar", Static).update(f"{frame} Pushing {name}…")
+
+    def _advance_loading(self) -> None:
+        if self._loading_job_id is None:
+            self._cancel_loading_timer()
+            return
+        self._loading_frame += 1
+        self._update_loading_status()
+
+    def _cancel_loading_timer(self) -> None:
+        if self._loading_timer is not None:
+            self._loading_timer.stop()
+            self._loading_timer = None
 
     def _dismiss_loading(self) -> None:
         if self._loading_job_id is None:
             return
+        self._cancel_loading_timer()
         self._loading_job_id = None
-        if isinstance(self.app.screen, PushingScreen):
-            self.app.pop_screen()
+        self._loading_name = None
 
     def _begin_push(self, job_id: str, path: str) -> None:
         """Show loading and run git push off the UI thread."""
@@ -605,6 +602,9 @@ class QueueScreen(Screen[None]):
             self._update_status_bar(jobs)
 
     def _update_status_bar(self, jobs: list[Job]) -> None:
+        if self._loading_job_id is not None:
+            self._update_loading_status()
+            return
         pending = pending_jobs(jobs)
         pushing = pushing_jobs(jobs)
         failed = [j for j in jobs if j.status == JobStatus.FAILED]
