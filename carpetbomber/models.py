@@ -46,6 +46,17 @@ class Job:
     created_at: datetime = field(default_factory=lambda: datetime.now().astimezone())
     last_error: str | None = None
     ssh_passphrase: str | None = None
+    commit_message: str = ""
+    commit_head: str | None = None
+    commit_created: bool = False
+
+    @property
+    def is_commit(self) -> bool:
+        return bool(self.commit_message.strip())
+
+    @property
+    def operation_name(self) -> str:
+        return "Commit" if self.is_commit else "Push"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Job:
@@ -55,6 +66,9 @@ class Job:
         except ValueError:
             status = JobStatus.PENDING
         passphrase = data.get("ssh_passphrase")
+        commit_message = data.get("commit_message", "")
+        commit_head = data.get("commit_head")
+        commit_created = bool(data.get("commit_created", False))
         return cls(
             id=str(data.get("id") or uuid4()),
             path=str(data["path"]),
@@ -64,6 +78,9 @@ class Job:
             created_at=_parse_dt(data.get("created_at", datetime.now().astimezone())),
             last_error=data.get("last_error"),
             ssh_passphrase=str(passphrase) if passphrase is not None else None,
+            commit_message=str(commit_message) if commit_message is not None else "",
+            commit_head=str(commit_head) if commit_head is not None else None,
+            commit_created=commit_created,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -76,4 +93,7 @@ class Job:
             "created_at": self.created_at.isoformat(),
             "last_error": self.last_error,
             "ssh_passphrase": self.ssh_passphrase,
+            "commit_message": self.commit_message,
+            "commit_head": self.commit_head,
+            "commit_created": self.commit_created,
         }

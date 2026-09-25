@@ -129,3 +129,28 @@ def test_queue_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert len(loaded) == 1
     assert loaded[0].path == "/repo"
     assert loaded[0].scheduled_at == job.scheduled_at
+
+
+def test_job_commit_fields_roundtrip_and_legacy_default():
+    job = Job(
+        path="/repo",
+        scheduled_at=_dt(2026, 9, 24),
+        requested_at=_dt(2026, 9, 24),
+        commit_message="save work",
+        commit_head="abc123",
+    )
+    restored = Job.from_dict(job.to_dict())
+    assert restored.commit_message == "save work"
+    assert restored.commit_head == "abc123"
+    assert restored.is_commit
+
+    legacy = Job.from_dict(
+        {
+            "path": "/repo",
+            "scheduled_at": _dt(2026, 9, 24).isoformat(),
+            "requested_at": _dt(2026, 9, 24).isoformat(),
+        }
+    )
+    assert legacy.commit_message == ""
+    assert legacy.commit_head is None
+    assert not legacy.is_commit

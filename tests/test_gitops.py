@@ -97,6 +97,38 @@ def test_git_push_with_passphrase_sets_askpass(tmp_path: Path):
     assert not Path(env["SSH_ASKPASS"]).exists()
 
 
+def test_git_commit_push_stages_commits_then_pushes():
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return GitResult(ok=True, stdout="", stderr="", returncode=0)
+
+    with (
+        patch.object(gitops, "_run", side_effect=fake_run),
+        patch.object(gitops, "git_push", return_value=GitResult(True, "", "", 0)) as push,
+    ):
+        result = gitops.git_commit_push("/repo", "save work", ssh_passphrase="pw")
+
+    assert result.ok
+    assert calls == [
+        ["git", "-C", "/repo", "add", "-A"],
+        ["git", "-C", "/repo", "commit", "-m", "save work"],
+    ]
+    push.assert_called_once_with(Path("/repo"), timeout=300, ssh_passphrase="pw")
+
+
+def test_git_commit_push_does_not_push_when_commit_fails():
+    failure = GitResult(ok=False, stdout="", stderr="nothing to commit", returncode=1)
+    with (
+        patch.object(gitops, "_run", side_effect=[GitResult(True, "", "", 0), failure]),
+        patch.object(gitops, "git_push") as push,
+    ):
+        result = gitops.git_commit_push("/repo", "save work")
+    assert result is failure
+    push.assert_not_called()
+
+
 def test_job_passphrase_roundtrip():
     job = Job(
         path="/repo",
@@ -239,3 +271,100 @@ def test_execute_push_skips_already_pushing(tmp_path: Path, monkeypatch):
     remaining = store.load_queue()
     assert len(remaining) == 1
     assert remaining[0].status == JobStatus.PUSHING
+
+
+def test_execute_commit_and_cancel_stale_commits_keep_push_jobs(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CARPETBOMBER_CONFIG_DIR", str(tmp_path))
+    from carpetbomber import daemon, store
+
+    scheduled = datetime(2026, 9, 24, 0, 0, tzinfo=TZ)
+    commit = Job(
+        path="/repo",
+        scheduled_at=scheduled,
+        requested_at=scheduled,
+        commit_message="save work",
+        commit_head="before",
+    )
+    other_commit = Job(
+        path="/repo",
+        scheduled_at=scheduled,
+        requested_at=scheduled,
+        commit_message="another commit",
+        commit_head="before",
+    )
+    push = Job(path="/repo", scheduled_at=scheduled, requested_at=scheduled)
+    store.save_queue([commit, other_commit, push])
+
+    with (
+        patch.object(daemon, "_log"),
+        patch.object(gitops, "repo_head", side_effect=["before", "after", "after"]),
+        patch.object(gitops, "git_commit", return_value=GitResult(True, "", "", 0)) as git_commit,
+        patch.object(gitops, "git_push", return_value=GitResult(True, "", "", 0)) as git_push,
+    ):
+        assert daemon.execute_push(commit.id) is True
+
+    git_commit.assert_called_once_with("/repo", "save work")
+    git_push.assert_called_once()
+    remaining = store.load_queue()
+    assert [j.id for j in remaining] == [push.id]
+
+
+def test_due_commit_with_advanced_head_is_removed_without_running(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CARPETBOMBER_CONFIG_DIR", str(tmp_path))
+    from carpetbomber import daemon, store
+
+    now = datetime(2026, 9, 24, 0, 0, tzinfo=TZ)
+    commit = Job(
+        path="/repo",
+        scheduled_at=now,
+        requested_at=now,
+        commit_message="save work",
+        commit_head="before",
+    )
+    push = Job(path="/repo", scheduled_at=now, requested_at=now)
+    store.save_queue([commit, push])
+
+    with (
+        patch.object(daemon, "_log"),
+        patch.object(gitops, "repo_head", return_value="after"),
+        patch.object(gitops, "git_commit") as git_commit,
+    ):
+        assert daemon.execute_push(commit.id) is False
+
+    git_commit.assert_not_called()
+    assert [j.id for j in store.load_queue()] == [push.id]
+
+
+def test_commit_push_failure_retry_pushes_without_duplicate_commit(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CARPETBOMBER_CONFIG_DIR", str(tmp_path))
+    from carpetbomber import daemon, store
+
+    now = datetime(2026, 9, 24, 0, 0, tzinfo=TZ)
+    job = Job(
+        path="/repo",
+        scheduled_at=now,
+        requested_at=now,
+        commit_message="save work",
+        commit_head="before",
+    )
+    store.save_queue([job])
+    with (
+        patch.object(daemon, "_log"),
+        patch.object(gitops, "repo_head", side_effect=["before", "after", "after"]),
+        patch.object(gitops, "git_commit", return_value=GitResult(True, "", "", 0)) as commit,
+        patch.object(
+            gitops,
+            "git_push",
+            side_effect=[GitResult(False, "", "offline", 1), GitResult(True, "", "", 0)],
+        ) as push,
+    ):
+        assert daemon.execute_push(job.id) is False
+        failed = store.load_queue()[0]
+        assert failed.status == JobStatus.FAILED
+        assert failed.commit_created
+        failed.status = JobStatus.PENDING
+        store.save_queue([failed])
+        assert daemon.execute_push(job.id) is True
+
+    commit.assert_called_once()
+    assert push.call_count == 2

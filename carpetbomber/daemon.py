@@ -85,23 +85,90 @@ def _finalize_push(job_id: str, *, ok: bool, error: str | None) -> bool:
     return removed["ok"]
 
 
+def remove_stale_commit_jobs(path: str, current_head: str | None = None) -> bool:
+    """Remove pending commit jobs for a repo whose recorded HEAD has advanced."""
+    if current_head is None:
+        current_head = gitops.repo_head(path)
+    if current_head is None:
+        return False
+
+    removed = {"any": False}
+
+    def mutator(jobs: list[Job]) -> list[Job]:
+        kept: list[Job] = []
+        for job in jobs:
+            if (
+                job.path == path
+                and job.is_commit
+                and job.status == JobStatus.PENDING
+                and job.commit_head is not None
+                and job.commit_head != current_head
+            ):
+                removed["any"] = True
+                continue
+            kept.append(job)
+        return kept
+
+    store.update_queue(mutator)
+    if removed["any"]:
+        _log(f"cancelled scheduled commit(s) for {path}: repository HEAD advanced")
+    return removed["any"]
+
+
 def execute_push(job_id: str) -> bool:
     """
     Run git push for a pending job.
     Returns True on success (job removed), False on failure or if job was not pending.
     """
+    queued = next((j for j in store.load_queue() if j.id == job_id), None)
+    if queued is None or queued.status != JobStatus.PENDING:
+        return False
+
+    before_head = gitops.repo_head(queued.path) if queued.is_commit else None
+    if queued.is_commit and not queued.commit_created and queued.commit_head and before_head:
+        if before_head != queued.commit_head:
+            remove_stale_commit_jobs(queued.path, before_head)
+            return False
+
     claimed = _claim_push(job_id)
     if claimed is None:
         return False
 
-    _log(f"pushing {claimed.path}")
-    result = gitops.git_push(claimed.path, ssh_passphrase=claimed.ssh_passphrase)
+    action = claimed.operation_name.lower()
+    verb = "committing and pushing" if claimed.is_commit else "pushing"
+    _log(f"{verb} {claimed.path}")
+    if claimed.is_commit:
+        if not claimed.commit_created:
+            result = gitops.git_commit(claimed.path, claimed.commit_message.strip())
+            if result.ok:
+                after_commit_head = gitops.repo_head(claimed.path)
+
+                def mark_commit_created(jobs: list[Job]) -> list[Job]:
+                    for job in jobs:
+                        if job.id == job_id and job.status == JobStatus.PUSHING:
+                            job.commit_created = True
+                            if after_commit_head:
+                                job.commit_head = after_commit_head
+                    return jobs
+
+                store.update_queue(mark_commit_created)
+                if after_commit_head and after_commit_head != before_head:
+                    remove_stale_commit_jobs(claimed.path, after_commit_head)
+                claimed.commit_created = True
+        else:
+            result = gitops.GitResult(ok=True, stdout="", stderr="", returncode=0)
+
+        if result.ok:
+            result = gitops.git_push(claimed.path, ssh_passphrase=claimed.ssh_passphrase)
+    else:
+        result = gitops.git_push(claimed.path, ssh_passphrase=claimed.ssh_passphrase)
+
     if result.ok:
-        _log(f"ok {claimed.path}")
+        _log(f"ok {action} {claimed.path}")
         return _finalize_push(job_id, ok=True, error=None)
 
-    err = (result.stderr or result.stdout or "git push failed").strip()
-    _log(f"fail {claimed.path}: {err}")
+    err = (result.stderr or result.stdout or f"git {action} failed").strip()
+    _log(f"fail {action} {claimed.path}: {err}")
     _finalize_push(job_id, ok=False, error=err)
     return False
 

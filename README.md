@@ -1,6 +1,6 @@
 # CarpetBomber
 
-Schedule `git push` jobs for later. The interactive TUI manages the queue; a macOS LaunchAgent daemon runs pushes in the background after you quit the terminal — including catch-up after sleep or reboot.
+Schedule `git push` jobs or staged commits for later. The interactive TUI manages the queue; a macOS LaunchAgent daemon runs scheduled work in the background after you quit the terminal — including catch-up after sleep or reboot.
 
 ## Install
 
@@ -40,7 +40,7 @@ From the queue screen:
 
 | Action | Key |
 |--------|-----|
-| Add push | `a` |
+| Add push or commit | `a` |
 | Edit selected | `e` |
 | Run selected now | `r` |
 | Cancel selected | `c` (then `y`/`n`) |
@@ -57,13 +57,15 @@ From the queue screen:
 | INSERT | type to edit; arrows move; `Esc` back to NORMAL |
 | COMMAND | `:w` save, `:wq` save and quit, `:q` quit without saving; `Esc` cancels |
 
-**Add a push:** edit JSON fields `path`, `date` (`YYYY-MM-DD`), and `time` (`HH:MM`). Defaults to **00:00 tomorrow**. CarpetBomber runs `git push` only (no commit). If the repo’s upstream is SSH (`git@…` / `ssh://…`), an `ssh_passphrase` field is included — fill it when the key is passphrase-protected (stored on the job in `queue.json`).
+**Add a push or commit:** edit JSON fields `path`, `date` (`YYYY-MM-DD`), `time` (`HH:MM`), and optional `commit_message`. Defaults to **00:00 tomorrow**. A blank `commit_message` runs `git push`; a nonblank message stages all changes with `git add -A`, creates a commit with that message, then pushes. If the repo’s upstream is SSH (`git@…` / `ssh://…`), an `ssh_passphrase` field is included — fill it when the key is passphrase-protected (stored on the job in `queue.json`).
 
-**Edit a push:** with a pending job selected, `e` opens the same JSON pre-filled so you can change path and/or schedule time. When SSH applies, `ssh_passphrase` is shown blank; leave it blank to keep a previously stored value.
+**Edit a scheduled item:** with a pending job selected, `e` opens the same JSON pre-filled so you can change path, schedule time, or commit message. When SSH applies, `ssh_passphrase` is shown blank; leave it blank to keep a previously stored value.
 
-**Run now:** with a pending or failed job selected, `r` runs `git push` immediately (failed jobs are re-queued first). An ASCII spinner appears in the status bar while the push runs. Success removes the job; failure keeps it as failed with the error.
+**Run now:** with a pending or failed job selected, `r` runs the scheduled operation immediately (failed jobs are re-queued first). An ASCII spinner appears in the status bar while it runs. Success removes the job; failure keeps it as failed with the error. If the commit succeeds but pushing fails, retry pushes that commit without creating a duplicate.
 
-**While the TUI is open**, CarpetBomber runs due pushes itself (no background polling). When a scheduled time arrives, the status bar shows an ASCII spinner while the job runs; the job is removed on success or marked failed. The LaunchAgent daemon is paused while the TUI is open and restarted on quit if pending jobs remain.
+**Commit monitoring:** while the TUI is open, it checks scheduled commits every five seconds. If the repository `HEAD` has advanced since a commit was scheduled, the pending commit job is removed. The daemon performs the same check when a commit becomes due. Push jobs are unaffected.
+
+**While the TUI is open**, CarpetBomber runs due jobs itself. When a scheduled time arrives, the status bar shows an ASCII spinner while the job runs; the job is removed on success or marked failed. The LaunchAgent daemon is paused while the TUI is open and restarted on quit if pending jobs remain.
 
 **Settings:** edit `push_spacing_minutes` in the JSON buffer, then `:wq`.
 
@@ -76,8 +78,8 @@ From the queue screen:
 Config lives in `~/.config/carpetbomber/`:
 
 - `settings.json` — `push_spacing_minutes`
-- `queue.json` — scheduled jobs (including optional `ssh_passphrase`)
-- `daemon.log` — push outcomes
+- `queue.json` — scheduled jobs (including optional `ssh_passphrase`, `commit_message`, and commit baseline)
+- `daemon.log` — operation outcomes
 
 On macOS, when the queue is non-empty, CarpetBomber installs a LaunchAgent at:
 

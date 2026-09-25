@@ -77,6 +77,12 @@ def resolve_repo_path(path: str | Path) -> Path | None:
     return Path(top) if top else p
 
 
+def repo_head(path: str | Path) -> str | None:
+    """Return the current commit id, or None when the repository has no HEAD."""
+    result = _run(["git", "-C", str(path), "rev-parse", "HEAD"])
+    return result.stdout.strip() if result.ok and result.stdout.strip() else None
+
+
 def _is_ssh_url(url: str) -> bool:
     u = url.strip()
     return u.startswith("git@") or u.startswith("ssh://") or u.startswith("ssh:")
@@ -191,3 +197,30 @@ def git_push(
                     pth.unlink(missing_ok=True)
                 except OSError:
                     pass
+
+
+def git_commit(path: str | Path, message: str, timeout: float = 300) -> GitResult:
+    """Stage all worktree changes and create a commit."""
+    p = Path(path)
+    staged = _run(["git", "-C", str(p), "add", "-A"], timeout=timeout)
+    if not staged.ok:
+        return staged
+    return _run(
+        ["git", "-C", str(p), "commit", "-m", message],
+        timeout=timeout,
+    )
+
+
+def git_commit_push(
+    path: str | Path,
+    message: str,
+    timeout: float = 300,
+    ssh_passphrase: str | None = None,
+) -> GitResult:
+    """Stage all worktree changes, commit them, then push the resulting commit."""
+    p = Path(path)
+    committed = git_commit(path, message, timeout=timeout)
+    if not committed.ok:
+        return committed
+
+    return git_push(p, timeout=timeout, ssh_passphrase=ssh_passphrase)

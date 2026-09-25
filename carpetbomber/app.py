@@ -154,11 +154,21 @@ def read_ssh_passphrase(data: dict[str, Any]) -> tuple[bool, str] | str:
     return True, raw
 
 
+def read_commit_message(data: dict[str, Any]) -> str | None:
+    raw = data.get("commit_message", "")
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        return "commit_message must be a string"
+    return raw.strip()
+
+
 def apply_add_job(
     path_raw: str,
     date_raw: str,
     time_raw: str,
     ssh_passphrase: str | None = None,
+    commit_message: str = "",
 ) -> tuple[Job, datetime] | str:
     """Return (job, requested) on success, or an error message."""
     if not path_raw:
@@ -188,6 +198,8 @@ def apply_add_job(
             scheduled_at=scheduled,
             requested_at=requested,
             ssh_passphrase=passphrase,
+            commit_message=commit_message,
+            commit_head=gitops.repo_head(resolved) if commit_message else None,
         )
         new_job_id = job.id
         return list(jobs) + [job]
@@ -196,7 +208,7 @@ def apply_add_job(
 
     added = next((j for j in new_jobs if j.id == new_job_id), None)
     if added is None:
-        return "Failed to queue push"
+        return "Failed to queue job"
     return added, requested
 
 
@@ -207,6 +219,7 @@ def apply_edit_job(
     time_raw: str,
     ssh_passphrase: str | None = None,
     passphrase_provided: bool = False,
+    commit_message: str | None = None,
 ) -> tuple[Job, datetime] | str:
     """Return (job, requested) on success, or an error message.
 
@@ -237,6 +250,8 @@ def apply_edit_job(
                 updated.append(job)
                 continue
             found = True
+            previous_path = job.path
+            previous_commit_message = job.commit_message
             scheduled = next_free_slot(
                 requested,
                 jobs,
@@ -246,6 +261,11 @@ def apply_edit_job(
             job.path = str(resolved)
             job.requested_at = requested
             job.scheduled_at = scheduled
+            if commit_message is not None:
+                job.commit_message = commit_message
+                if previous_path != str(resolved) or previous_commit_message != commit_message:
+                    job.commit_head = gitops.repo_head(resolved) if commit_message else None
+                    job.commit_created = False
             if needs_ssh:
                 if passphrase_provided and ssh_passphrase:
                     job.ssh_passphrase = ssh_passphrase
@@ -287,12 +307,13 @@ class AddPushScreen(JsonEditScreen):
             "path": path,
             "date": default.strftime("%Y-%m-%d"),
             "time": "00:00",
+            "commit_message": "",
         }
         # Include passphrase field when the path is already an SSH remote
         resolved = gitops.resolve_repo_path(path) if path else None
         if resolved and gitops.requires_ssh_auth(resolved):
             payload["ssh_passphrase"] = ""
-        super().__init__("Schedule a push", dumps_json(payload))
+        super().__init__("Schedule a push or commit", dumps_json(payload))
 
     def apply(self, data: dict[str, Any]) -> str | None:
         fields = schedule_fields_from_data(data)
@@ -303,11 +324,15 @@ class AddPushScreen(JsonEditScreen):
         if isinstance(pw, str):
             return pw
         _present, passphrase = pw
+        commit_message = read_commit_message(data)
+        if commit_message is None:
+            return "commit_message must be a string"
         result = apply_add_job(
             path_raw,
             date_raw,
             time_raw,
             ssh_passphrase=passphrase or None,
+            commit_message=commit_message,
         )
         if isinstance(result, str):
             return result
@@ -318,7 +343,7 @@ class AddPushScreen(JsonEditScreen):
         if got != req:
             extra = f" (slot adjusted to {format_dt(added.scheduled_at)})"
         self.notify(
-            f"Scheduled {Path(added.path).name} for {format_dt(added.scheduled_at)}{extra}"
+            f"Scheduled {added.operation_name.lower()} for {Path(added.path).name} at {format_dt(added.scheduled_at)}{extra}"
         )
         return None
 
@@ -331,11 +356,12 @@ class EditPushScreen(JsonEditScreen):
             "path": job.path,
             "date": local.strftime("%Y-%m-%d"),
             "time": local.strftime("%H:%M"),
+            "commit_message": job.commit_message,
         }
         if gitops.requires_ssh_auth(job.path):
             # Blank = keep stored passphrase (never echo the secret into the buffer)
             payload["ssh_passphrase"] = ""
-        super().__init__("Edit scheduled push", dumps_json(payload))
+        super().__init__(f"Edit scheduled {job.operation_name.lower()}", dumps_json(payload))
 
     def apply(self, data: dict[str, Any]) -> str | None:
         fields = schedule_fields_from_data(data)
@@ -346,6 +372,9 @@ class EditPushScreen(JsonEditScreen):
         if isinstance(pw, str):
             return pw
         passphrase_provided, passphrase = pw
+        commit_message = read_commit_message(data)
+        if commit_message is None:
+            return "commit_message must be a string"
         result = apply_edit_job(
             self.job.id,
             path_raw,
@@ -353,6 +382,7 @@ class EditPushScreen(JsonEditScreen):
             time_raw,
             ssh_passphrase=passphrase or None,
             passphrase_provided=passphrase_provided,
+            commit_message=commit_message,
         )
         if isinstance(result, str):
             return result
@@ -363,7 +393,7 @@ class EditPushScreen(JsonEditScreen):
         if got != req:
             extra = f" (slot adjusted to {format_dt(edited.scheduled_at)})"
         self.notify(
-            f"Updated {Path(edited.path).name} for {format_dt(edited.scheduled_at)}{extra}"
+            f"Updated {edited.operation_name.lower()} for {Path(edited.path).name} at {format_dt(edited.scheduled_at)}{extra}"
         )
         return None
 
@@ -424,6 +454,7 @@ class QueueScreen(Screen[None]):
         self._schedule_timer = None
         self._spacing_after_push = False
         self._cancel_confirm_id: str | None = None
+        self._commit_watch_timer = None
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if self._loading_job_id is not None and action in (
@@ -448,7 +479,7 @@ class QueueScreen(Screen[None]):
 
     def on_mount(self) -> None:
         table = self.query_one("#queue-table", DataTable)
-        table.add_columns("Path", "Requested", "Scheduled", "Status", "Error")
+        table.add_columns("Type", "Path", "Requested", "Scheduled", "Status", "Error")
         # While the TUI is open it owns push execution — pause LaunchAgent to avoid races
         launchd.stop_daemon()
         n = daemon.recover_stale_pushing()
@@ -457,6 +488,7 @@ class QueueScreen(Screen[None]):
         self._refresh_banner()
         self.refresh_table()
         self._arm_next_push()
+        self._commit_watch_timer = self.set_interval(5, self._check_repository_commits)
 
     def on_resize(self, event) -> None:
         self._refresh_banner()
@@ -468,6 +500,21 @@ class QueueScreen(Screen[None]):
     def on_unmount(self) -> None:
         self._cancel_schedule_timer()
         self._cancel_loading_timer()
+        if self._commit_watch_timer is not None:
+            self._commit_watch_timer.stop()
+            self._commit_watch_timer = None
+
+    def _check_repository_commits(self) -> None:
+        jobs = store.load_queue()
+        paths = {j.path for j in jobs if j.is_commit and j.commit_head}
+        removed = False
+        for path in paths:
+            current_head = gitops.repo_head(path)
+            if current_head:
+                removed = daemon.remove_stale_commit_jobs(path, current_head) or removed
+        if removed:
+            self.refresh_table()
+            self._arm_next_push()
 
     def _refresh_banner(self) -> None:
         self.query_one("#banner", Static).update(render_title())
@@ -530,8 +577,10 @@ class QueueScreen(Screen[None]):
     def _update_loading_status(self) -> None:
         frames = "|/-\\"
         frame = frames[self._loading_frame % len(frames)]
-        name = self._loading_name or "push"
-        self.query_one("#status-bar", Static).update(f"{frame} Pushing {name}…")
+        name = self._loading_name or "job"
+        job = next((j for j in store.load_queue() if j.id == self._loading_job_id), None)
+        action = job.operation_name.lower() if job else "running"
+        self.query_one("#status-bar", Static).update(f"{frame} {action.title()} {name}…")
 
     def _advance_loading(self) -> None:
         if self._loading_job_id is None:
@@ -553,14 +602,15 @@ class QueueScreen(Screen[None]):
         self._loading_name = None
 
     def _begin_push(self, job_id: str, path: str) -> None:
-        """Show loading and run git push off the UI thread."""
+        """Show loading and run the scheduled Git operation off the UI thread."""
         if self._loading_job_id is not None:
             return
         self._cancel_schedule_timer()
         name = Path(path).name
         self._show_loading(job_id, path)
         self.refresh_table()
-        self._run_push_worker(job_id, name)
+        job = next((j for j in store.load_queue() if j.id == job_id), None)
+        self._run_push_worker(job_id, name, bool(job and job.is_commit))
 
     def refresh_table(self) -> None:
         table = self.query_one("#queue-table", DataTable)
@@ -577,6 +627,7 @@ class QueueScreen(Screen[None]):
         for job in sorted(jobs, key=lambda j: (j.scheduled_at, j.created_at)):
             err = (job.last_error or "")[:40]
             table.add_row(
+                job.operation_name,
                 job.path,
                 format_dt(job.requested_at),
                 format_dt(job.scheduled_at),
@@ -656,7 +707,7 @@ class QueueScreen(Screen[None]):
     def action_run_selected(self) -> None:
         self._echo_cmd("r")
         if self._loading_job_id is not None:
-            self.notify("A push is already in progress", severity="warning")
+            self.notify("A scheduled operation is already in progress", severity="warning")
             return
         job_id = self._selected_job_id()
         if not job_id:
@@ -690,21 +741,30 @@ class QueueScreen(Screen[None]):
         self._begin_push(job_id, path)
 
     @work(thread=True, exclusive=True, group="push")
-    def _run_push_worker(self, job_id: str, name: str) -> None:
+    def _run_push_worker(self, job_id: str, name: str, is_commit: bool) -> None:
         ok = daemon.execute_push(job_id)
-        self.app.call_from_thread(self._finish_push, job_id, name, ok)
+        self.app.call_from_thread(self._finish_push, job_id, name, is_commit, ok)
 
-    def _finish_push(self, job_id: str, name: str, ok: bool) -> None:
+    def _finish_push(self, job_id: str, name: str, is_commit: bool, ok: bool) -> None:
         remaining = store.load_queue()
         if self._loading_job_id == job_id:
             self._dismiss_loading()
         self.refresh_table()
         if ok:
-            self.notify(f"Pushed {name}")
+            operation = "Committed and pushed" if is_commit else "Pushed"
+            self.notify(f"{operation} {name}")
         else:
             failed = next((j for j in remaining if j.id == job_id), None)
-            err = (failed.last_error if failed else None) or "git push failed"
-            self.notify(f"Push failed: {err[:120]}", severity="error")
+            if failed is None:
+                if is_commit:
+                    self.notify(f"Scheduled commit for {name} was cancelled because the repository changed")
+                else:
+                    self.notify(f"Scheduled push for {name} was cancelled")
+                self._arm_next_push()
+                return
+            action = failed.operation_name.lower()
+            err = failed.last_error or f"git {action} failed"
+            self.notify(f"{action.title()} failed: {err[:120]}", severity="error")
 
         # Space catch-up pushes when more overdue work remains
         now = datetime.now().astimezone()
@@ -763,7 +823,7 @@ class QueueScreen(Screen[None]):
 
 class CarpetBomberApp(App[None]):
     TITLE = "CarpetBomber"
-    SUB_TITLE = "scheduled git pushes"
+    SUB_TITLE = "scheduled git jobs"
     CSS = """
     Screen {
         background: #0f1419;
