@@ -174,6 +174,9 @@ def apply_add_job(
     if not path_raw:
         return "Path is required"
 
+    if path_raw.strip() == "this":
+        path_raw = str(Path.cwd())
+
     resolved = gitops.resolve_repo_path(path_raw)
     if resolved is None:
         return "Not a git repository"
